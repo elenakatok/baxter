@@ -1,0 +1,427 @@
+import React, { useEffect, useState } from 'react'
+import { doc, getDoc } from 'firebase/firestore'
+import { httpsCallable } from 'firebase/functions'
+import { auth, db, rtdb, functions } from '../firebase'
+import { assignRole, confirmReady, verifyAttendanceCode, CLASSROOM_URL } from '../api'
+import {
+  useStudentSession,
+  KnowledgeCheck,
+  InfoPage,
+  PrepQuestions,
+  GameHeader,
+  WaitingRoom,
+  GroupReveal,
+  OffPlatformHolding,
+  Results,
+  typography,
+  colors,
+  layout,
+  spacing,
+} from '@mygames/game-ui'
+import type { BootstrapArgs, InfoPageLink } from '@mygames/game-ui'
+import OutcomeReporting from '../phases/OutcomeReporting'
+import { baxterConfig, baxterSchema, FIELD_LABELS, formatField } from '../gameConfig'
+
+// ── Phase state ───────────────────────────────────────────────────────────────
+
+type GamePhase =
+  | { name: 'loading' }
+  | { name: 'error';           message: string }
+  | { name: 'info';            roleLabel: string; links: InfoPageLink[]; publicLink: { label: string; url: string } | null }
+  | { name: 'kc' }
+  | { name: 'prep' }
+  | { name: 'hold' }
+  | { name: 'confirmation' }
+  | { name: 'attendance-code' }
+  | { name: 'waiting-room' }
+  | { name: 'group-reveal';    groupId: string }
+  | { name: 'off-platform';    groupId: string }
+  | { name: 'outcome-reporting'; groupId: string; isLead: boolean }
+  | { name: 'results';         groupId: string }
+
+// ── Phase routing ─────────────────────────────────────────────────────────────
+
+type GetInfoUrlsResult = {
+  ok: boolean
+  roleLabel: string
+  links: InfoPageLink[]
+  publicLink: { label: string; url: string } | null
+}
+
+async function routeToPhase(participantId: string, gameInstanceId: string): Promise<GamePhase> {
+  const snap = await getDoc(
+    doc(db, 'game_instances', gameInstanceId, 'participants', participantId),
+  )
+  const d = snap.data() ?? {}
+
+  if (d.prep_status !== 'complete') {
+    if (d.knowledge_check_score != null) return { name: 'prep' }
+    const fn = httpsCallable<object, GetInfoUrlsResult>(functions, 'getInfoUrls')
+    const { data } = await fn({})
+    return {
+      name:       'info',
+      roleLabel:  data.roleLabel,
+      links:      data.links,
+      publicLink: data.publicLink ?? null,
+    }
+  }
+
+  // prep_status === 'complete' — Phase 2 routing
+  if (!d.confirmed_ready_at)    return { name: 'hold' }
+  if (!d.attendance_confirmed_at) return { name: 'confirmation' }
+  if (!d.group_id)              return { name: 'waiting-room' }
+
+  const groupId = d.group_id as string
+  const groupSnap = await getDoc(
+    doc(db, 'game_instances', gameInstanceId, 'groups', groupId),
+  )
+  const g = groupSnap.data() ?? {}
+  const status = g['status'] as string | undefined
+
+  if (status === 'matched')    return { name: 'group-reveal', groupId }
+  if (status === 'negotiating') return { name: 'off-platform', groupId }
+  if (status === 'reporting' || status === 'deadlocked') {
+    return { name: 'outcome-reporting', groupId, isLead: d.is_lead === true }
+  }
+  if (status === 'completed')  return { name: 'results', groupId }
+
+  return { name: 'waiting-room' }
+}
+
+// ── Baxter-specific outcome formatter ─────────────────────────────────────────
+
+function formatBaxterOutcome(
+  outcome: Record<string, unknown> | null,
+  agreementReached: boolean,
+): React.ReactNode {
+  if (!agreementReached || outcome == null) {
+    return (
+      <p style={{ fontSize: '1.05rem', color: colors.textSecondary, marginBottom: layout.pagePad }}>
+        No deal reached.
+      </p>
+    )
+  }
+  return (
+    <div style={{
+      background:   '#f0f7ff',
+      border:       '1px solid #b3d4f5',
+      borderRadius: '4px',
+      padding:      '0.75rem 1rem',
+      marginBottom: layout.pagePad,
+    }}>
+      {baxterSchema.map(field => (
+        <div key={field.key} style={{ display: 'flex', justifyContent: 'space-between', padding: '0.2rem 0' }}>
+          <span style={{ color: colors.textSecondary, marginRight: '1rem' }}>
+            {FIELD_LABELS[field.key] ?? field.key}
+          </span>
+          <span>{formatField(field, outcome[field.key])}</span>
+        </div>
+      ))}
+    </div>
+  )
+}
+
+// ── Component ─────────────────────────────────────────────────────────────────
+
+export default function Play() {
+  const p       = new URLSearchParams(window.location.search)
+  const token   = p.get('token')
+  const testPid = import.meta.env.DEV ? p.get('_pid') : null
+  const testGid = import.meta.env.DEV ? p.get('_gid') : null
+
+  const [phase, setPhase]             = useState<GamePhase>({ name: 'loading' })
+  const [headerLinks, setHeaderLinks] = useState<InfoPageLink[] | null>(null)
+  const [confError,   setConfError]   = useState<string | null>(null)
+  const [confLoading, setConfLoading] = useState(false)
+  const [codeValue,   setCodeValue]   = useState('')
+  const [codeError,   setCodeError]   = useState<string | null>(null)
+  const [codeLoading, setCodeLoading] = useState(false)
+
+  // ── Session lifecycle ────────────────────────────────────────────────────
+
+  const session = useStudentSession({
+    auth,
+    token,
+    testIds: (testPid && testGid) ? { participantId: testPid, gameInstanceId: testGid } : null,
+    bootstrap: async (args: BootstrapArgs) => {
+      const r = await assignRole(args)
+      return {
+        participantId:  r.participant_id,
+        gameInstanceId: r.game_instance_id,
+        customToken:    r.customToken,
+      }
+    },
+  })
+
+  // ── Phase routing + header-link population ────────────────────────────────
+
+  useEffect(() => {
+    if (session.kind !== 'ready') return
+    const { participantId, gameInstanceId } = session
+    let cancelled = false
+
+    const run = async () => {
+      let p: GamePhase
+      try {
+        p = await routeToPhase(participantId, gameInstanceId)
+      } catch (err) {
+        if (!cancelled) setPhase({ name: 'error', message: err instanceof Error ? err.message : 'Failed to load session.' })
+        return
+      }
+      if (cancelled) return
+      setPhase(p)
+
+      if (p.name === 'info') {
+        if (!cancelled) setHeaderLinks(p.links)
+      } else {
+        const fn = httpsCallable<object, GetInfoUrlsResult>(functions, 'getInfoUrls')
+        fn({}).then(({ data }) => { if (!cancelled) setHeaderLinks(data.links) }).catch(() => {})
+      }
+    }
+
+    void run()
+    return () => { cancelled = true }
+  }, [session])
+
+  // ── Render: pre-session states (no header) ────────────────────────────────
+
+  if (session.kind === 'loading' || (session.kind === 'ready' && phase.name === 'loading')) {
+    return (
+      <main style={{ padding: '2rem', fontFamily: typography.fontFamily }}>
+        <p>Loading…</p>
+      </main>
+    )
+  }
+
+  if (session.kind === 'no-token') {
+    return (
+      <main style={{ padding: '2rem', fontFamily: typography.fontFamily, maxWidth: '480px', margin: '2rem auto' }}>
+        <h2 style={{ marginBottom: '0.75rem' }}>Baxter</h2>
+        <p>Please launch Baxter from the classroom to join a session.</p>
+        <p style={{ marginTop: '1.5rem' }}><a href={CLASSROOM_URL}>← Go to classroom</a></p>
+      </main>
+    )
+  }
+
+  if (session.kind === 'error') {
+    return (
+      <main style={{ padding: '2rem', fontFamily: typography.fontFamily }}>
+        <p style={{ color: '#c00' }}>{session.message}</p>
+        <p><a href={CLASSROOM_URL}>← Return to classroom</a></p>
+      </main>
+    )
+  }
+
+  if (phase.name === 'error') {
+    return (
+      <main style={{ padding: '2rem', fontFamily: typography.fontFamily }}>
+        <p style={{ color: '#c00' }}>{phase.message}</p>
+        <p><a href={CLASSROOM_URL}>← Return to classroom</a></p>
+      </main>
+    )
+  }
+
+  const { participantId, gameInstanceId } = session
+
+  // ── P2 inline handlers ────────────────────────────────────────────────────
+
+  const handleConfirmReady = () => {
+    setConfLoading(true)
+    setConfError(null)
+    confirmReady({})
+      .then(() => setPhase({ name: 'attendance-code' }))
+      .catch((err: unknown) => {
+        setConfError(err instanceof Error ? err.message : 'Something went wrong. Please try again.')
+        setConfLoading(false)
+      })
+  }
+
+  const handleAttendanceCode = (e: React.FormEvent) => {
+    e.preventDefault()
+    const code = codeValue.trim()
+    if (code.length < 4) return
+    setCodeLoading(true)
+    setCodeError(null)
+    verifyAttendanceCode({}, code)
+      .then(() => setPhase({ name: 'waiting-room' }))
+      .catch((err: unknown) => {
+        setCodeError(err instanceof Error ? err.message : 'Something went wrong. Please try again.')
+        setCodeLoading(false)
+      })
+  }
+
+  // ── Render: session ready — header persists across all phases ─────────────
+
+  return (
+    <div style={{ fontFamily: typography.fontFamily }}>
+      <GameHeader studentLinks={headerLinks} />
+
+      {phase.name === 'info' && (
+        <InfoPage
+          roleLabel={phase.roleLabel}
+          links={phase.links}
+          publicLink={phase.publicLink}
+          onContinue={() => setPhase({ name: 'kc' })}
+        />
+      )}
+
+      {phase.name === 'kc' && (
+        <KnowledgeCheck
+          participantId={participantId}
+          gameInstanceId={gameInstanceId}
+          functions={functions}
+          db={db}
+          onComplete={() => setPhase({ name: 'prep' })}
+        />
+      )}
+
+      {phase.name === 'prep' && (
+        <PrepQuestions
+          participantId={participantId}
+          gameInstanceId={gameInstanceId}
+          functions={functions}
+          db={db}
+          onComplete={() => setPhase({ name: 'hold' })}
+        />
+      )}
+
+      {phase.name === 'hold' && (
+        <main style={{ padding: layout.pagePad, maxWidth: layout.contentWidth, margin: '0 auto' }}>
+          <h1 style={{ marginTop: 0 }}>Preparation complete</h1>
+          <p style={{ lineHeight: 1.6, marginBottom: spacing.gapSm }}>
+            When class begins and your instructor starts the session, you&apos;ll see who
+            you&apos;ve been matched with.
+          </p>
+          <p style={{ color: colors.textSecondary, marginBottom: layout.pagePad }}>
+            You can close this tab and come back later — your work has been saved.
+          </p>
+          <button onClick={() => setPhase({ name: 'confirmation' })}>
+            I&apos;m in class — continue
+          </button>
+        </main>
+      )}
+
+      {phase.name === 'confirmation' && (
+        <main style={{ padding: layout.pagePad, maxWidth: layout.contentWidth, margin: '0 auto' }}>
+          <h1 style={{ marginTop: 0 }}>Ready to negotiate?</h1>
+          <p style={{ lineHeight: 1.6, marginBottom: spacing.gapSm }}>
+            You&apos;ll be paired with other students for a face-to-face negotiation.
+            Only continue if you are in class and ready to negotiate right now.
+          </p>
+          {confError && (
+            <p style={{ color: '#c00', marginBottom: spacing.gapSm }}>{confError}</p>
+          )}
+          <div style={{ display: 'flex', gap: spacing.gapBtn }}>
+            <button onClick={handleConfirmReady} disabled={confLoading}>
+              {confLoading ? 'Confirming…' : "Yes, I'm ready"}
+            </button>
+            <button
+              onClick={() => setPhase({ name: 'hold' })}
+              disabled={confLoading}
+              style={{ background: 'none', border: '1px solid #ccc' }}
+            >
+              Not now
+            </button>
+          </div>
+        </main>
+      )}
+
+      {phase.name === 'attendance-code' && (
+        <main style={{ padding: layout.pagePad, maxWidth: '540px', margin: '0 auto' }}>
+          <h1 style={{ marginTop: 0 }}>Enter attendance code</h1>
+          <p style={{ lineHeight: 1.6, marginBottom: layout.pagePad }}>
+            Enter the code your instructor is displaying.
+          </p>
+          <form onSubmit={handleAttendanceCode}>
+            <input
+              value={codeValue}
+              onChange={e => setCodeValue(e.target.value.toUpperCase())}
+              maxLength={6}
+              placeholder="e.g. ABJKM"
+              autoFocus
+              autoCapitalize="characters"
+              spellCheck={false}
+              disabled={codeLoading}
+              style={{
+                fontSize:     '2rem',
+                letterSpacing: '0.25em',
+                width:         '100%',
+                padding:       '0.5rem 0.75rem',
+                boxSizing:     'border-box',
+                fontFamily:    'monospace',
+                textTransform: 'uppercase',
+              }}
+            />
+            {codeError && (
+              <p style={{ color: '#c00', marginTop: '0.75rem' }}>{codeError}</p>
+            )}
+            <button
+              type="submit"
+              disabled={codeLoading || codeValue.trim().length < 4}
+              style={{ marginTop: spacing.gapMd }}
+            >
+              {codeLoading ? 'Checking…' : 'Submit'}
+            </button>
+          </form>
+        </main>
+      )}
+
+      {phase.name === 'waiting-room' && (
+        <WaitingRoom
+          participantId={participantId}
+          gameInstanceId={gameInstanceId}
+          db={db}
+          rtdb={rtdb}
+          onMatched={(groupId) => setPhase({ name: 'group-reveal', groupId })}
+        />
+      )}
+
+      {phase.name === 'group-reveal' && (
+        <GroupReveal
+          groupId={phase.groupId}
+          participantId={participantId}
+          gameInstanceId={gameInstanceId}
+          roleConfig={baxterConfig}
+          db={db}
+          rtdb={rtdb}
+          functions={functions}
+          onContinue={() => setPhase({ name: 'off-platform', groupId: phase.groupId })}
+        />
+      )}
+
+      {phase.name === 'off-platform' && (
+        <OffPlatformHolding
+          groupId={phase.groupId}
+          participantId={participantId}
+          gameInstanceId={gameInstanceId}
+          db={db}
+          onReportOutcome={(isLead) => setPhase({ name: 'outcome-reporting', groupId: phase.groupId, isLead })}
+        />
+      )}
+
+      {phase.name === 'outcome-reporting' && (
+        <OutcomeReporting
+          groupId={phase.groupId}
+          participantId={participantId}
+          gameInstanceId={gameInstanceId}
+          isLead={phase.isLead}
+          args={{}}
+          onComplete={() => setPhase({ name: 'results', groupId: phase.groupId })}
+        />
+      )}
+
+      {phase.name === 'results' && (
+        <Results
+          groupId={phase.groupId}
+          participantId={participantId}
+          gameInstanceId={gameInstanceId}
+          roleConfig={baxterConfig}
+          formatOutcome={formatBaxterOutcome}
+          db={db}
+          rtdb={rtdb}
+          functions={functions}
+        />
+      )}
+    </div>
+  )
+}
