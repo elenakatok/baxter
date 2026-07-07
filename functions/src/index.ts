@@ -62,6 +62,7 @@ export const submitStaticKnowledgeCheckQuestion = makeSubmitStaticKnowledgeCheck
 export const getInfoUrls                        = makeGetInfoUrls(baxterGameDef)
 export { getReportData } from './getReportData'
 export { updateGroupContract } from './updateGroupContract'
+export { updateScheme1978 } from './updateScheme1978'
 export { scoreAndRecord } from './scoreAndRecord'
 
 // ── Non-game onRequest endpoints (kept as-is; not converted) ──────────────────

@@ -129,7 +129,15 @@ export const getReportData = onCall({ cors: baxterGameDef.corsOrigins }, async (
 
     // Authoritative contract schema, straight from the game definition — the report
     // page renders its inline editor from THIS, never the (drift-prone) client mirror.
-    return { ok: true as const, rows, questions: TEXT_QUESTIONS, schema: baxterGameDef.outcomeSchema }
+    // scheme1978: the class-level 1978 scoring scheme (or null if never entered) so the
+    // report-grid entry tile can load current values without a second round-trip.
+    return {
+      ok: true as const,
+      rows,
+      questions: TEXT_QUESTIONS,
+      schema: baxterGameDef.outcomeSchema,
+      scheme1978: (configData['scheme1978'] ?? null) as unknown,
+    }
   } catch (err) {
     if (err instanceof HttpsError) throw err
     console.error('[getReportData] error:', err)

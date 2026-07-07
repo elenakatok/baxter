@@ -15,7 +15,65 @@ import {
 } from '@mygames/game-ui'
 import { SurplusScatterSVG, type ScatterPoint } from '../components/SurplusScatterSVG'
 import { SchemaField, parseForm, type FormValues } from '../phases/OutcomeReporting'
-import { type OutcomeSchema } from '../gameConfig'
+import { baxterSchema, FIELD_LABELS, OPTION_LABELS, type OutcomeSchema } from '../gameConfig'
+
+// ── 1978 scoring scheme (class-level; entered via the report-grid tile) ─────────
+// Issues + options are exactly the six enum fields of the 1978 outcome contract.
+const ISSUES_1978 = baxterSchema.filter(
+  (f): f is { key: string; type: 'enum'; options: string[] } => f.type === 'enum',
+)
+const TOTAL_OPTIONS = ISSUES_1978.reduce((a, i) => a + i.options.length, 0)
+
+const ROLE_COLS: { key: 'baxter' | 'union'; label: string }[] = [
+  { key: 'baxter', label: 'Baxter Management' },
+  { key: 'union',  label: 'Local 190' },
+]
+
+type Scheme1978 = {
+  baxter?: { optionScores?: Record<string, Record<string, number>> }
+  union?:  { optionScores?: Record<string, Record<string, number>> }
+} | null
+
+// Draft holds raw input strings (blank = unentered) keyed role → issue → option.
+type OptionScoresDraft = Record<string, Record<string, string>>
+type SchemeDraft = { baxter: OptionScoresDraft; union: OptionScoresDraft }
+
+function draftFromScheme(scheme: Scheme1978): SchemeDraft {
+  const build = (role: 'baxter' | 'union'): OptionScoresDraft => {
+    const os = scheme?.[role]?.optionScores ?? {}
+    const out: OptionScoresDraft = {}
+    for (const issue of ISSUES_1978) {
+      out[issue.key] = {}
+      for (const opt of issue.options) {
+        const v = os[issue.key]?.[opt]
+        out[issue.key][opt] = (typeof v === 'number' && Number.isFinite(v)) ? String(v) : ''
+      }
+    }
+    return out
+  }
+  return { baxter: build('baxter'), union: build('union') }
+}
+
+function schemeFromDraft(draft: SchemeDraft) {
+  const build = (role: 'baxter' | 'union') => {
+    const optionScores: Record<string, Record<string, number>> = {}
+    for (const issue of ISSUES_1978) {
+      for (const opt of issue.options) {
+        const raw = (draft[role][issue.key]?.[opt] ?? '').trim()
+        if (raw === '') continue
+        const n = Number(raw)
+        if (Number.isFinite(n)) (optionScores[issue.key] ??= {})[opt] = n
+      }
+    }
+    return { optionScores }
+  }
+  return { baxter: build('baxter'), union: build('union') }
+}
+
+function enteredCount(scheme: Scheme1978, role: 'baxter' | 'union'): number {
+  const os = scheme?.[role]?.optionScores ?? {}
+  return Object.values(os).reduce((a, m) => a + Object.keys(m).length, 0)
+}
 
 // Pareto frontier endpoints (already in MILLIONS; x = WineMaster, y = Home Base) — from the target image.
 const WM_FRONTIER: { x: number; y: number }[] = [
@@ -194,6 +252,7 @@ export default function Reports() {
   const [rows,      setRows]      = useState<ReportRow[] | null>(null)
   const [questions, setQuestions] = useState<QuestionMeta[]>([])
   const [schema,    setSchema]    = useState<OutcomeSchema | null>(null)
+  const [scheme1978, setScheme1978] = useState<Scheme1978>(null)
   const [loading,   setLoading]   = useState(false)
   const [error,     setError]     = useState<string | null>(null)
 
@@ -201,17 +260,52 @@ export default function Reports() {
     if (!sessionReady) return
     setLoading(true)
     setError(null)
-    const fn = httpsCallable<object, { ok: boolean; rows: ReportRow[]; questions: QuestionMeta[]; schema: OutcomeSchema }>(functions, 'getReportData')
+    const fn = httpsCallable<object, { ok: boolean; rows: ReportRow[]; questions: QuestionMeta[]; schema: OutcomeSchema; scheme1978: Scheme1978 }>(functions, 'getReportData')
     fn({}).then(r => {
       setRows(r.data.rows)
       setQuestions(r.data.questions)
       setSchema(r.data.schema)
+      setScheme1978(r.data.scheme1978 ?? null)
       setLoading(false)
     }).catch((err: unknown) => {
       setError(err instanceof Error ? err.message : 'Failed to load report data.')
       setLoading(false)
     })
   }, [sessionReady])
+
+  // ── 1978 scoring-scheme editor (class-level; report-grid entry tile) ─────────
+  const [schemeOpen,   setSchemeOpen]   = useState(false)
+  const [schemeDraft,  setSchemeDraft]  = useState<SchemeDraft | null>(null)
+  const [schemeSaving, setSchemeSaving] = useState(false)
+  const [schemeError,  setSchemeError]  = useState<string | null>(null)
+
+  const openScheme = () => {
+    setSchemeDraft(draftFromScheme(scheme1978))
+    setSchemeError(null)
+    setSchemeOpen(true)
+  }
+
+  const setScore = (role: 'baxter' | 'union', issue: string, opt: string, val: string) =>
+    setSchemeDraft(prev => prev
+      ? { ...prev, [role]: { ...prev[role], [issue]: { ...prev[role][issue], [opt]: val } } }
+      : prev)
+
+  const saveScheme = async () => {
+    if (!schemeDraft) return
+    setSchemeSaving(true)
+    setSchemeError(null)
+    try {
+      const payload = schemeFromDraft(schemeDraft)
+      const fn = httpsCallable<{ scheme1978: unknown }, { ok: boolean; scheme1978: Scheme1978 }>(functions, 'updateScheme1978')
+      const res = await fn({ scheme1978: payload })
+      setScheme1978(res.data.scheme1978 ?? null)
+      setSchemeOpen(false)
+    } catch (err) {
+      setSchemeError(err instanceof Error ? err.message : 'Failed to save scoring scheme.')
+    } finally {
+      setSchemeSaving(false)
+    }
+  }
 
   // ── Inline group-contract editor (report-only: writes the group contract and
   //    recomputes each member's raw_score via updateGroupContract; never z-scores) ──
@@ -298,7 +392,22 @@ export default function Reports() {
     win.document.close()
   }
 
+  const baxterEntered = enteredCount(scheme1978, 'baxter')
+  const unionEntered  = enteredCount(scheme1978, 'union')
+
   const tiles: ReportTileConfig[] = [
+    {
+      id: 'scheme1978',
+      title: '1978 Scoring Scheme — option scores',
+      preview: (baxterEntered === 0 && unionEntered === 0)
+        ? <span style={{ color: '#94a3b8', fontSize: '0.85rem' }}>Not yet entered</span>
+        : <span style={{ fontSize: '0.9rem', color: '#555' }}>
+            Baxter {baxterEntered}/{TOTAL_OPTIONS} · Union {unionEntered}/{TOTAL_OPTIONS} scores
+          </span>,
+      onOpen: openScheme,
+      disabled: !sessionReady,
+      actionLabel: (baxterEntered || unionEntered) ? 'Edit ↗' : 'Enter ↗',
+    },
     {
       id: 'contract-outcomes',
       title: 'Contract Outcomes — per participant',
@@ -482,6 +591,76 @@ export default function Reports() {
                 {saving ? 'Saving…' : 'Save'}
               </button>
               <button onClick={() => setEditing(null)} disabled={saving} style={{ padding: '0.4rem 1rem', background: 'none', border: '1px solid #ccc', borderRadius: 4, cursor: 'pointer' }}>
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── 1978 scoring-scheme editor (class-level; per-option scores, no weights) ── */}
+      {schemeOpen && schemeDraft && (
+        <div
+          onClick={() => !schemeSaving && setSchemeOpen(false)}
+          style={{
+            position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)',
+            display: 'flex', alignItems: 'flex-start', justifyContent: 'center',
+            padding: '3rem 1rem', zIndex: 1100, overflowY: 'auto',
+          }}
+        >
+          <div
+            onClick={e => e.stopPropagation()}
+            style={{
+              background: '#fff', borderRadius: 8, boxShadow: '0 8px 32px rgba(0,0,0,0.3)',
+              width: '100%', maxWidth: 'min(900px, calc(100vw - 2rem))', boxSizing: 'border-box',
+              maxHeight: 'calc(100vh - 6rem)', overflowY: 'auto', padding: '1.25rem 1.5rem',
+            }}
+          >
+            <h3 style={{ margin: '0 0 0.5rem', fontSize: '1rem', fontWeight: 600 }}>1978 Scoring Scheme</h3>
+            <p style={{ margin: '0 0 1rem', fontSize: '0.85rem', color: '#666' }}>
+              Enter the score for each option, per role. The 1978 score sums the entered score for
+              each option the group agreed on. Blank counts as 0. Weights are not entered.
+            </p>
+
+            <div style={{ display: 'flex', gap: '1.5rem', flexWrap: 'wrap' }}>
+              {ROLE_COLS.map(role => (
+                <div key={role.key} style={{ flex: '1 1 340px', minWidth: 300 }}>
+                  <h4 style={{ margin: '0 0 0.75rem', fontSize: '0.95rem', fontWeight: 700, borderBottom: '2px solid #D38626', paddingBottom: '0.25rem' }}>
+                    {role.label}
+                  </h4>
+                  {ISSUES_1978.map(issue => (
+                    <div key={issue.key} style={{ marginBottom: '0.9rem' }}>
+                      <div style={{ fontSize: '0.85rem', fontWeight: 600, color: '#333', marginBottom: '0.35rem' }}>
+                        {FIELD_LABELS[issue.key] ?? issue.key}
+                      </div>
+                      {issue.options.map(opt => (
+                        <label key={opt} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '0.75rem', padding: '0.15rem 0' }}>
+                          <span style={{ fontSize: '0.85rem', color: '#555' }}>
+                            {OPTION_LABELS[issue.key]?.[opt] ?? opt}
+                          </span>
+                          <input
+                            type="number"
+                            inputMode="decimal"
+                            value={schemeDraft[role.key][issue.key]?.[opt] ?? ''}
+                            onChange={e => { setScore(role.key, issue.key, opt, e.target.value); setSchemeError(null) }}
+                            disabled={schemeSaving}
+                            style={{ width: '5.5rem', fontSize: '0.9rem', padding: '0.25rem 0.4rem', border: '1px solid #ccc', borderRadius: 4, textAlign: 'right' }}
+                          />
+                        </label>
+                      ))}
+                    </div>
+                  ))}
+                </div>
+              ))}
+            </div>
+
+            {schemeError && <p style={{ color: '#c00', margin: '0.75rem 0 0', fontSize: '0.9rem' }}>{schemeError}</p>}
+
+            <div style={{ display: 'flex', gap: '0.75rem', marginTop: '1rem' }}>
+              <button onClick={saveScheme} disabled={schemeSaving} style={{ padding: '0.4rem 1rem', cursor: 'pointer' }}>
+                {schemeSaving ? 'Saving…' : 'Save scheme'}
+              </button>
+              <button onClick={() => setSchemeOpen(false)} disabled={schemeSaving} style={{ padding: '0.4rem 1rem', background: 'none', border: '1px solid #ccc', borderRadius: 4, cursor: 'pointer' }}>
                 Cancel
               </button>
             </div>
