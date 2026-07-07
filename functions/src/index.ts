@@ -10,6 +10,7 @@ import {
   makeGetRoster,
   makeSyncRoster,
   makeTriggerMatching,
+  makeAdvanceRound,
   makeStartNegotiation,
   makeSubmitLeadOutcome,
   makeSubmitConfirmation,
@@ -47,6 +48,7 @@ export const verifyAttendanceCode   = makeVerifyAttendanceCode(baxterGameDef)
 export const getRoster              = makeGetRoster(baxterGameDef)
 export const syncRoster             = makeSyncRoster(baxterGameDef)
 export const triggerMatching            = makeTriggerMatching(baxterGameDef)
+export const advanceRound               = makeAdvanceRound(baxterGameDef)
 export const startNegotiation           = makeStartNegotiation(baxterGameDef)
 export const submitLeadOutcome          = makeSubmitLeadOutcome(baxterGameDef)
 export const submitConfirmation         = makeSubmitConfirmation(baxterGameDef)

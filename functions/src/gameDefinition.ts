@@ -80,6 +80,10 @@ export const baxterGameDef: GameDefinition = {
   roles:   baxterConfig,
   scoreSense: baxterScoreSense,
   composition: { baxter: 2, union: 2 },
+  // Multi-round (staging skeleton): three sequential negotiations. Round 1 (1978)
+  // is the existing single-outcome round with the Slice-1 scorer. Rounds 1983/1985
+  // are advanceable phases with no content/scoring yet (later slices).
+  rounds: ['1978', '1983', '1985'],
   outcomeSchema: baxterSchema,
   computeRawScore,
   computeScoreBreakdown,
