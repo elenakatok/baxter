@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react'
+import React, { useEffect, useRef, useState } from 'react'
 import { doc, getDoc, onSnapshot } from 'firebase/firestore'
 import { httpsCallable } from 'firebase/functions'
 import { auth, db, rtdb, functions } from '../firebase'
@@ -35,6 +35,7 @@ type GamePhase =
   | { name: 'attendance-code' }
   | { name: 'waiting-room' }
   | { name: 'group-reveal';    groupId: string }
+  | { name: 'day2-hold';       groupId: string }
   | { name: 'off-platform';    groupId: string }
   | { name: 'outcome-reporting'; groupId: string; isLead: boolean }
   | { name: 'results';         groupId: string }
@@ -78,6 +79,7 @@ async function routeToPhase(
   participantId: string,
   gameInstanceId: string,
   currentRound: number,
+  round2Begun: boolean,
 ): Promise<GamePhase> {
   const snap = await getDoc(
     doc(db, 'game_instances', gameInstanceId, 'participants', participantId),
@@ -125,7 +127,15 @@ async function routeToPhase(
   if (status === 'reporting' || status === 'deadlocked') {
     return { name: 'outcome-reporting', groupId, isLead: d.is_lead === true }
   }
-  if (status === 'completed')  return { name: 'results', groupId }
+  if (status === 'completed') {
+    // Bug F: in a day-2 round (currentRound > 0), a 'completed' group whose day-2 re-open has
+    // NOT run yet (round2_begun_at unset) is still closed from the previous round — Begin 1983
+    // has not been clicked. Route to the day-2 waiting hold, NOT results, and NOT the shared
+    // GroupReveal whose "Start negotiation" button would 400 against a not-yet-reopened group.
+    // Once the round has begun, a 'completed' group means this round is genuinely resolved.
+    if (currentRound > 0 && !round2Begun) return { name: 'day2-hold', groupId }
+    return { name: 'results', groupId }
+  }
 
   return { name: 'waiting-room' }
 }
@@ -163,6 +173,62 @@ function formatBaxterOutcome(
   )
 }
 
+// ── Day-2 pre-negotiation hold (Bug F) ────────────────────────────────────────
+// After re-attending for a day-2 round, the group is still 'completed' from the prior round
+// until the instructor clicks "Begin 1983" (which re-opens it straight to 'negotiating' via
+// reopenGroupPatch). This screen replaces the shared GroupReveal for day-2 rounds: it shows a
+// waiting state with NO start button — gating on the group's ACTUAL status, the same signal
+// startNegotiation requires — and hands off only once the group is genuinely re-opened. That
+// removes the early "Start negotiation" click that 400s against a not-yet-reopened group.
+
+function Day2Hold({
+  groupId,
+  participantId,
+  gameInstanceId,
+  onNegotiate,
+  onReport,
+}: {
+  groupId:        string
+  participantId:  string
+  gameInstanceId: string
+  onNegotiate:    () => void
+  onReport:       (isLead: boolean) => void
+}) {
+  const onNegotiateRef = useRef(onNegotiate)
+  const onReportRef    = useRef(onReport)
+  onNegotiateRef.current = onNegotiate
+  onReportRef.current    = onReport
+
+  useEffect(() => {
+    const groupRef = doc(db, 'game_instances', gameInstanceId, 'groups', groupId)
+    return onSnapshot(groupRef, (snap) => {
+      if (!snap.exists()) return
+      const g = snap.data() as Record<string, unknown>
+      const status = g['status'] as string | undefined
+      // Re-opened for the new round → straight into the negotiation (reopenGroupPatch sets
+      // 'negotiating' directly, so there is no 'matched'/Start-button step in a day-2 round).
+      if (status === 'negotiating') { onNegotiateRef.current(); return }
+      // Instructor intervention (e.g. an absence deadlock flagged by Begin 1983) → reporting view.
+      if (status === 'reporting' || status === 'deadlocked') {
+        onReportRef.current((g['lead_participant_id'] as string | undefined) === participantId)
+      }
+      // 'completed' (still closed) → keep waiting; no start action is offered.
+    })
+  }, [groupId, gameInstanceId, participantId])
+
+  return (
+    <main style={{ padding: layout.pagePad, maxWidth: layout.contentWidth, margin: '0 auto' }}>
+      <h1 style={{ marginTop: 0 }}>You&apos;re checked in</h1>
+      <p style={{ lineHeight: 1.6, marginBottom: spacing.gapSm }}>
+        Waiting for your instructor to begin the 1983 negotiation.
+      </p>
+      <p style={{ color: colors.textSecondary }}>
+        Stay on this page — it will advance automatically once your group is re-opened.
+      </p>
+    </main>
+  )
+}
+
 // ── Component ─────────────────────────────────────────────────────────────────
 
 export default function Play() {
@@ -172,6 +238,7 @@ export default function Play() {
   const testGid = import.meta.env.DEV ? p.get('_gid') : null
 
   const [phase, setPhase]             = useState<GamePhase>({ name: 'loading' })
+  const [currentRound, setCurrentRound] = useState(0)
   const [headerLinks, setHeaderLinks] = useState<InfoPageLink[] | null>(null)
   const [confError,   setConfError]   = useState<string | null>(null)
   const [confLoading, setConfLoading] = useState(false)
@@ -218,10 +285,10 @@ export default function Play() {
       fn({}).then(({ data }) => { if (!cancelled) setHeaderLinks(data.links) }).catch(() => {})
     }
 
-    const evaluate = async (roundIdx: number) => {
+    const evaluate = async (roundIdx: number, round2Begun: boolean) => {
       let p: GamePhase
       try {
-        p = await routeToPhase(participantId, gameInstanceId, roundIdx)
+        p = await routeToPhase(participantId, gameInstanceId, roundIdx, round2Begun)
       } catch (err) {
         if (!cancelled) setPhase({ name: 'error', message: err instanceof Error ? err.message : 'Failed to load session.' })
         return
@@ -235,15 +302,17 @@ export default function Play() {
       doc(db, 'game_instances', gameInstanceId),
       (snap) => {
         const idx = clampRoundIndex(snap.data()?.current_round)
-        if (idx === lastRound) return   // only re-route when the round pointer actually changes
+        const round2Begun = snap.data()?.round2_begun_at != null
+        setCurrentRound(idx)              // keep render-scope round fresh (waiting-room routing)
+        if (idx === lastRound) return     // only re-route when the round pointer actually changes
         lastRound = idx
-        void evaluate(idx)
+        void evaluate(idx, round2Begun)
       },
       () => {
         // Instance doc unreadable (e.g. firestore rule not yet deployed) — fall back to
         // round 1 once so a normal round-1 student is never blocked. Live day-2 re-routing
         // requires the instance read rule (games/baxter/firestore.rules).
-        if (lastRound === null) { lastRound = 0; void evaluate(0) }
+        if (lastRound === null) { lastRound = 0; void evaluate(0, false) }
       },
     )
 
@@ -439,7 +508,20 @@ export default function Play() {
           gameInstanceId={gameInstanceId}
           db={db}
           rtdb={rtdb}
-          onMatched={(groupId) => setPhase({ name: 'group-reveal', groupId })}
+          // Round 1: the shared GroupReveal + "Start negotiation" flow (unchanged). Day-2 rounds
+          // (Bug F): the group is re-attended but not yet re-opened, so go to the day-2 hold —
+          // never the GroupReveal Start button, which would 400 pre-Begin-1983.
+          onMatched={(groupId) => setPhase(currentRound > 0 ? { name: 'day2-hold', groupId } : { name: 'group-reveal', groupId })}
+        />
+      )}
+
+      {phase.name === 'day2-hold' && (
+        <Day2Hold
+          groupId={phase.groupId}
+          participantId={participantId}
+          gameInstanceId={gameInstanceId}
+          onNegotiate={() => setPhase({ name: 'off-platform', groupId: phase.groupId })}
+          onReport={(isLead) => setPhase({ name: 'outcome-reporting', groupId: phase.groupId, isLead })}
         />
       )}
 
