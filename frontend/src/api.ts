@@ -48,14 +48,6 @@ export function isAuthError(err: unknown): boolean {
 
 export type OutcomeFields = Record<string, unknown>
 
-// Persists prep_status='complete' (a protected field). Baxter has NO prep questions, so the
-// shared PrepQuestions component auto-skips WITHOUT calling completePrep — we must call it
-// ourselves when the prep phase completes, otherwise prep_status stays 'not_started' and the
-// router's phase-2 gate (prep_status === 'complete') never opens on a re-evaluation (day-2
-// re-route would bounce the student back through prep → hold instead of to attendance-code).
-export const completePrep = (args: CallArgs) =>
-  callFn<{ ok: boolean }>('completePrep', args)
-
 export const confirmReady = (args: CallArgs) =>
   callFn<{ ok: boolean }>('confirmReady', args)
 

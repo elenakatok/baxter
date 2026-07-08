@@ -2,7 +2,7 @@ import React, { useEffect, useRef, useState } from 'react'
 import { doc, getDoc, onSnapshot } from 'firebase/firestore'
 import { httpsCallable } from 'firebase/functions'
 import { auth, db, rtdb, functions } from '../firebase'
-import { assignRole, completePrep, confirmReady, verifyAttendanceCode, CLASSROOM_URL } from '../api'
+import { assignRole, confirmReady, verifyAttendanceCode, CLASSROOM_URL } from '../api'
 import {
   useStudentSession,
   KnowledgeCheck,
@@ -462,11 +462,9 @@ export default function Play() {
           gameInstanceId={gameInstanceId}
           functions={functions}
           db={db}
-          // Baxter has no prep questions, so PrepQuestions auto-skips WITHOUT persisting
-          // prep_status. Persist it ourselves (idempotent, non-blocking) so the router's phase-2
-          // gate opens on later re-evaluations — without this, the day-2 re-route bounces the
-          // student back through prep → hold instead of forward to the attendance-code screen.
-          onComplete={() => { void completePrep({}).catch(() => {}); setPhase({ name: 'hold' }) }}
+          // Baxter has no prep questions; PrepQuestions (game-ui) auto-skips AND now persists
+          // prep_status='complete' itself on the zero-questions path, so we just advance here.
+          onComplete={() => setPhase({ name: 'hold' })}
         />
       )}
 
