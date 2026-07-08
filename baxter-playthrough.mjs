@@ -195,6 +195,28 @@ async function driveToWaiting(s, code) {
   log(pid, '★ waiting room')
 }
 
+// ── Day-2 re-attendance: drive a re-routing student to the code screen, then enter the code ──
+// Matches the manual flow: after "Open Round 2 Attendance" the student leaves the results
+// screen and heads toward re-attendance. Depending on state it may pass through the
+// "Preparation complete" hold and/or the "Ready to negotiate?" confirmation before the code
+// screen — click through whichever appear (tolerant), then submit the 1983 code.
+async function reAttend(page, pid, code) {
+  for (let i = 0; i < 8; i++) {
+    if (await page.locator('h1:has-text("Enter attendance code")').isVisible().catch(() => false)) break
+    if (await page.locator('button:has-text("in class")').isVisible().catch(() => false)) {
+      await page.click('button:has-text("in class")'); await sleep(400); continue
+    }
+    if (await page.locator("button:has-text(\"Yes, I'm ready\")").isVisible().catch(() => false)) {
+      await page.click("button:has-text(\"Yes, I'm ready\")"); await sleep(400); continue
+    }
+    await sleep(1000)
+  }
+  await page.waitForSelector('h1:has-text("Enter attendance code")', { timeout: 20_000 })
+  await page.locator('input').fill(code)
+  await page.click('button[type="submit"]')
+  log(pid, 're-attended for 1983')
+}
+
 // ── 1978 negotiation: group reveal → off-platform → report canonical deal ───────
 
 async function drive1978Negotiation(students) {
@@ -304,20 +326,18 @@ async function main() {
   await dash.click('button:has-text("Open Round 2 Attendance")')
   log('instr', 'clicked "Open Round 2 Attendance" (→ 1983)')
 
-  // BUG A: each completed-1978 student must re-route LIVE to the day-2 attendance-code screen.
-  banner('Bug A — re-route to day-2 code screen')
-  await Promise.all(students.map(async s => {
-    await s.page.waitForSelector('h1:has-text("Enter attendance code")', { timeout: 30_000 })
-  }))
-  assert(true, 'Bug A — all completed-1978 students routed to the day-2 code screen (not results)')
-
-  // 6. Instructor generates the 1983 code; students re-attend.
+  // 6. Instructor generates the 1983 code UP FRONT — matching the manual flow order
+  //    (advance → GENERATE 1983 code → students see the code screen → students ENTER it).
   const { code: code83 } = await inst('generateAttendanceCode')
   log('instr', `1983 attendance code: ${code83}`)
-  await Promise.all(students.map(async s => {
-    await s.page.locator('input').fill(code83)
-    await s.page.click('button[type="submit"]')
-  }))
+
+  // BUG A: each completed-1978 student must re-route OFF the results screen for day-2
+  //        re-attendance. reAttend() drives through any hold/confirmation to the code screen,
+  //        then enters the 1983 code — so a student stranded on results (the Bug-A regression)
+  //        would never reach the code screen and this fails loudly.
+  banner('Bug A — re-route off results → day-2 re-attendance')
+  await Promise.all(students.map(s => reAttend(s.page, s.pid, code83)))
+  assert(true, 'Bug A — all completed-1978 students re-attended for 1983 (not stranded on results)')
 
   // BUG F: on round-2 pre-Begin, students see a WAITING hold with NO clickable Start button.
   banner('Bug F — pre-Begin waiting state, no Start button')
