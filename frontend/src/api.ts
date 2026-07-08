@@ -106,6 +106,20 @@ export const syncRoster = () =>
 export const generateAttendanceCode = () =>
   callFn<{ ok: boolean; code: string }>('generateAttendanceCode', {})
 
+// ── Day-2 re-attendance orchestration (Slice 2.7) ──────────────────────────────
+/** Button 1 — advance 1978→1983 WITHOUT re-opening groups (students re-confirm attendance). */
+export const openRound2Attendance = () =>
+  callFn<{ ok: boolean; current_round: number; round_id: string }>('openRound2Attendance', {})
+
+/** Button 2 — the absence cutoff: re-open / promote-present-lead / deadlock-flag every group. */
+export type BeginRound2Result = {
+  ok: boolean
+  round_id: string
+  groups: Array<{ group_id: string; action: string; detail?: unknown }>
+}
+export const beginRound2 = () =>
+  callFn<BeginRound2Result>('beginRound2', {})
+
 export const getRoster = () =>
   callFn<{ ok: boolean; participants: RosterParticipant[]; groups: RosterGroup[] }>('getRoster', {})
 

@@ -1,0 +1,188 @@
+/**
+ * Baxter day-2 re-attendance orchestration callables (Slice 2.7) — the two-button
+ * instructor sequence for moving the class from 1978 into 1983 while re-confirming who is
+ * still in the room. GAME-SPECIFIC: both callables COMPOSE general primitives
+ * (clampRoundIndex / resolveRoundSlot / presenceAtSlot / reopenGroupPatch) and the pure
+ * decideGroupDay2 branch core; neither modifies shared machinery.
+ *
+ *  Button 1  openRound2Attendance — advance current_round 1978→1983 WITHOUT re-opening
+ *            groups. Students then re-confirm attendance for the new round (the instructor
+ *            regenerates the code via the existing generateAttendanceCode); their round-2
+ *            presence lands in attendance_by_round because current_round is now 1983.
+ *
+ *  Button 2  beginRound2 — the ABSENCE CUTOFF. One atomic pass: read round-2 presence and,
+ *            per group, re-open (normal) / promote-a-present-partner-then-re-open (lead
+ *            absent) / flag deadlocked (a whole role missing). See decideGroupDay2.
+ */
+import { onCall, HttpsError } from 'firebase-functions/v2/https'
+import * as admin from 'firebase-admin'
+import {
+  extractInstructorGameId,
+  clampRoundIndex,
+  resolveRoundSlot,
+  presenceAtSlot,
+  reopenGroupPatch,
+} from '@mygames/game-server'
+import { baxterGameDef } from './gameDefinition'
+import { decideGroupDay2 } from './day2Attendance'
+
+const CORS = baxterGameDef.corsOrigins
+const ROLE_KEYS = baxterGameDef.roles.roles.map((r) => r.key)
+const ROUNDS = baxterGameDef.rounds ?? []
+const IDX_1978 = ROUNDS.indexOf('1978')
+const IDX_1983 = ROUNDS.indexOf('1983')
+
+/**
+ * Button 1 — "Open Round 2 Attendance". Advances the class from 1978 to 1983 by bumping the
+ * round pointer ONLY; groups stay 'completed' (closed) so students re-confirm attendance
+ * rather than negotiate. This is the day-2 counterpart to the general advanceRound, minus
+ * the re-open (which is deferred to Button 2). Same all-groups-resolved gate as advanceRound.
+ *
+ * Guarded to the 1978→1983 hop only (currentIdx must be the 1978 index) so a stray second
+ * click can never skip the class straight past 1983 into 1985.
+ */
+export const openRound2Attendance = onCall({ cors: CORS }, async (request) => {
+  const data = request.data as Record<string, unknown>
+  const isEmulator = process.env.FUNCTIONS_EMULATOR === 'true'
+  const authHeader = request.rawRequest.headers.authorization as string | undefined
+  const gameInstanceId = await extractInstructorGameId(data, isEmulator, authHeader)
+
+  try {
+    const db = admin.firestore()
+    const instanceRef = db.collection('game_instances').doc(gameInstanceId)
+    const [instanceSnap, groupsSnap] = await Promise.all([
+      instanceRef.get(),
+      instanceRef.collection('groups').get(),
+    ])
+
+    const currentIdx = clampRoundIndex(ROUNDS.length, instanceSnap.data()?.['current_round'])
+    if (currentIdx !== IDX_1978) {
+      throw new HttpsError(
+        'failed-precondition',
+        `Round 2 attendance can only be opened from the 1978 round (current: ${ROUNDS[currentIdx]}).`,
+      )
+    }
+
+    // Gate cloned from advanceRound: every group must have resolved 1978 before advancing.
+    if (groupsSnap.empty) {
+      throw new HttpsError('failed-precondition', 'No groups yet — cannot open round 2 attendance.')
+    }
+    for (const g of groupsSnap.docs) {
+      if (g.data()['status'] !== 'completed') {
+        throw new HttpsError(
+          'failed-precondition',
+          `Group ${g.id} has not resolved 1978 — resolve all groups before opening round 2.`,
+        )
+      }
+    }
+
+    // Advance the round pointer WITHOUT re-opening. Groups stay 'completed'; students
+    // re-confirm attendance for 1983 (current_round is now 1983, so Slice-2.6 records the
+    // round-2 slot). Re-open happens at Button 2 (beginRound2), after the absence cutoff.
+    await instanceRef.set({ current_round: IDX_1983 }, { merge: true })
+    return { ok: true as const, current_round: IDX_1983, round_id: ROUNDS[IDX_1983] }
+  } catch (err) {
+    if (err instanceof HttpsError) throw err
+    console.error('[openRound2Attendance] error:', err)
+    throw new HttpsError('internal', 'Internal error')
+  }
+})
+
+/**
+ * Button 2 — "Begin 1983". The absence cutoff. Anyone not present in round-2 attendance by
+ * now is absent for day 2 (absence = no round-2 presence record; no positive flag needed).
+ *
+ * One atomic batch over every group so a degenerate group never briefly shows 'negotiating'
+ * before being flagged. Per group (decideGroupDay2):
+ *   normal     → re-open (reopenGroupPatch), lead unchanged.
+ *   reassign   → promote the present same-role partner (is_lead flip + lead_participant_id),
+ *                then re-open. Silent — no confirmation, no notification.
+ *   degenerate → do NOT re-open; flag status:'deadlocked' (+ reason) for manual instructor
+ *                resolution via the existing submitInstructorOutcome path. A deadlocked group
+ *                blocks the all-groups-resolved advance gate exactly as a normal deadlock does.
+ *
+ * Idempotent: only 'completed' groups are processed, so a second click (or a re-run after
+ * 1983 negotiation has started) is a no-op and never resets in-progress work.
+ */
+export const beginRound2 = onCall({ cors: CORS }, async (request) => {
+  const data = request.data as Record<string, unknown>
+  const isEmulator = process.env.FUNCTIONS_EMULATOR === 'true'
+  const authHeader = request.rawRequest.headers.authorization as string | undefined
+  const gameInstanceId = await extractInstructorGameId(data, isEmulator, authHeader)
+
+  try {
+    const db = admin.firestore()
+    const instanceRef = db.collection('game_instances').doc(gameInstanceId)
+    const [instanceSnap, groupsSnap, participantsSnap] = await Promise.all([
+      instanceRef.get(),
+      instanceRef.collection('groups').get(),
+      instanceRef.collection('participants').get(),
+    ])
+
+    const currentIdx = clampRoundIndex(ROUNDS.length, instanceSnap.data()?.['current_round'])
+    const slot = resolveRoundSlot(ROUNDS, currentIdx)
+    // Must be at 1983 (Button 1 already advanced the pointer). Round-1 resolves to a flat slot.
+    if (slot.kind !== 'keyed' || currentIdx !== IDX_1983) {
+      throw new HttpsError(
+        'failed-precondition',
+        'Open Round 2 Attendance first, then Begin 1983.',
+      )
+    }
+    if (groupsSnap.empty) {
+      throw new HttpsError('failed-precondition', 'No groups to begin.')
+    }
+
+    // Round-2 present set: a participant is present iff they re-confirmed attendance for the
+    // 1983 slot (Slice-2.6 keyed presence). Absent day-2 students are simply not in the set.
+    const presentIds = new Set<string>()
+    for (const p of participantsSnap.docs) {
+      if (presenceAtSlot(p.data(), slot)) presentIds.add(p.id)
+    }
+
+    const batch = db.batch()
+    const summary: Array<{ group_id: string; action: string; detail?: unknown }> = []
+    for (const g of groupsSnap.docs) {
+      const gdata = g.data()
+      // Idempotency: only groups still closed from 1978 ('completed') are cut over. Skip any
+      // already re-opened/deadlocked so a re-run never resets in-progress 1983 work.
+      if (gdata['status'] !== 'completed') {
+        summary.push({ group_id: g.id, action: 'skipped' })
+        continue
+      }
+
+      const membersByRole: Record<string, string[]> = {}
+      for (const role of ROLE_KEYS) {
+        membersByRole[role] = (gdata[`${role}_participants`] as string[] | undefined) ?? []
+      }
+      const leadId = gdata['lead_participant_id'] as string
+      const action = decideGroupDay2(ROLE_KEYS, membersByRole, presentIds, leadId)
+
+      if (action.kind === 'degenerate') {
+        batch.update(g.ref, {
+          status: 'deadlocked',
+          day2_deadlock_reason: 'absent_role',
+          day2_missing_roles: action.missingRoles,
+        })
+        summary.push({ group_id: g.id, action: 'deadlocked', detail: action.missingRoles })
+      } else if (action.kind === 'reassign') {
+        batch.update(g.ref, { ...reopenGroupPatch(), lead_participant_id: action.newLeadId })
+        batch.update(instanceRef.collection('participants').doc(action.newLeadId), { is_lead: true })
+        batch.update(instanceRef.collection('participants').doc(action.oldLeadId), { is_lead: false })
+        summary.push({
+          group_id: g.id,
+          action: 'reassigned',
+          detail: { from: action.oldLeadId, to: action.newLeadId },
+        })
+      } else {
+        batch.update(g.ref, reopenGroupPatch())
+        summary.push({ group_id: g.id, action: 'reopened' })
+      }
+    }
+    await batch.commit()
+    return { ok: true as const, round_id: ROUNDS[currentIdx], groups: summary }
+  } catch (err) {
+    if (err instanceof HttpsError) throw err
+    console.error('[beginRound2] error:', err)
+    throw new HttpsError('internal', 'Internal error')
+  }
+})

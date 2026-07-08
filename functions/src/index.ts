@@ -62,6 +62,7 @@ export const getDebriefQuestions                = makeGetDebriefQuestions(baxter
 export const submitKnowledgeCheck               = makeSubmitKnowledgeCheck(baxterGameDef)
 export const submitStaticKnowledgeCheckQuestion = makeSubmitStaticKnowledgeCheckQuestion(baxterGameDef)
 export const getInfoUrls                        = makeGetInfoUrls(baxterGameDef)
+export { openRound2Attendance, beginRound2 } from './day2Callables'
 export { getReportData } from './getReportData'
 export { updateGroupContract } from './updateGroupContract'
 export { updateScheme1978 } from './updateScheme1978'
