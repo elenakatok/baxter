@@ -16,6 +16,7 @@
  */
 import { onCall, HttpsError } from 'firebase-functions/v2/https'
 import * as admin from 'firebase-admin'
+import { FieldValue } from 'firebase-admin/firestore'
 import {
   extractInstructorGameId,
   clampRoundIndex,
@@ -201,7 +202,7 @@ export const beginRound2 = onCall({ cors: CORS }, async (request) => {
     // Persistent "round 2 has begun" marker on the instance doc. The dashboard gates the
     // "Begin 1983" button on this (not on transient group statuses) so it never re-appears
     // after the 1983 round finishes and re-opens groups back to 'completed' (Bug B loop).
-    batch.set(instanceRef, { round2_begun_at: admin.firestore.FieldValue.serverTimestamp() }, { merge: true })
+    batch.set(instanceRef, { round2_begun_at: FieldValue.serverTimestamp() }, { merge: true })
 
     await batch.commit()
     return { ok: true as const, round_id: ROUNDS[currentIdx], groups: summary }
