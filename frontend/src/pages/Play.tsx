@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react'
-import { doc, getDoc } from 'firebase/firestore'
+import { doc, getDoc, onSnapshot } from 'firebase/firestore'
 import { httpsCallable } from 'firebase/functions'
 import { auth, db, rtdb, functions } from '../firebase'
 import { assignRole, confirmReady, verifyAttendanceCode, CLASSROOM_URL } from '../api'
@@ -48,11 +48,41 @@ type GetInfoUrlsResult = {
   publicLink: { label: string; url: string } | null
 }
 
-async function routeToPhase(participantId: string, gameInstanceId: string): Promise<GamePhase> {
+// Baxter's round list (mirrors functions/src/gameDefinition.ts `rounds`). Round-scoped
+// presence + round-index clamping below mirror game-server's pure getRoundPresence /
+// clampRoundIndex (v0.11.0). We re-implement the tiny pure logic here rather than importing
+// @mygames/game-server, which is a Cloud-Functions (firebase-admin) package that cannot be
+// bundled into a browser build. Semantics are identical for Baxter's rounds.
+const BAXTER_ROUNDS = ['1978', '1983', '1985'] as const
+
+/** Clamp a stored (possibly missing/garbage) round pointer to a valid index. */
+function clampRoundIndex(stored: unknown): number {
+  const i = (typeof stored === 'number' && Number.isInteger(stored)) ? stored : 0
+  return Math.max(0, Math.min(i, BAXTER_ROUNDS.length - 1))
+}
+
+/**
+ * Is this participant present for the given round (Option-1 derive)?
+ * Round 1 (idx 0) uses the flat `attendance_confirmed_at` flag (unchanged); rounds 2+ use
+ * the keyed `attendance_by_round[roundId]` map written by verifyAttendanceCode when the
+ * instance's current_round has advanced.
+ */
+function isPresentForRound(p: Record<string, unknown>, roundIdx: number): boolean {
+  if (roundIdx <= 0) return p['attendance_confirmed_at'] != null
+  const roundId = BAXTER_ROUNDS[roundIdx]
+  const map = (p['attendance_by_round'] ?? {}) as Record<string, unknown>
+  return map[roundId] != null
+}
+
+async function routeToPhase(
+  participantId: string,
+  gameInstanceId: string,
+  currentRound: number,
+): Promise<GamePhase> {
   const snap = await getDoc(
     doc(db, 'game_instances', gameInstanceId, 'participants', participantId),
   )
-  const d = snap.data() ?? {}
+  const d = (snap.data() ?? {}) as Record<string, unknown>
 
   if (d.prep_status !== 'complete') {
     if (d.knowledge_check_score != null) return { name: 'prep' }
@@ -68,7 +98,19 @@ async function routeToPhase(participantId: string, gameInstanceId: string): Prom
 
   // prep_status === 'complete' — Phase 2 routing
   if (!d.confirmed_ready_at)    return { name: 'hold' }
-  if (!d.attendance_confirmed_at) return { name: 'confirmation' }
+
+  // Round-scoped attendance gate (Bug A, keystone). Presence is per-round: a student who
+  // completed round 1 but has NOT re-confirmed attendance for the ADVANCED round must return
+  // to the attendance flow — and this check runs BEFORE the group-status routing below,
+  // so it takes precedence over the completed→results branch that otherwise strands a
+  // day-1-completed student on their 1978 results when the class moves to 1983.
+  if (!isPresentForRound(d, currentRound)) {
+    // Round 1 keeps the existing two-step confirmation→code flow (unchanged). Rounds 2+
+    // (day 2) go straight to the code screen — the student already confirmed-ready in round 1
+    // and confirmed_ready_at persists, so re-confirming readiness would be redundant.
+    return currentRound <= 0 ? { name: 'confirmation' } : { name: 'attendance-code' }
+  }
+
   if (!d.group_id)              return { name: 'waiting-room' }
 
   const groupId = d.group_id as string
@@ -154,33 +196,58 @@ export default function Play() {
   })
 
   // ── Phase routing + header-link population ────────────────────────────────
+  // Bug A: the router is now REACTIVE to the instance's current_round. We subscribe to the
+  // instance doc and re-run routeToPhase whenever the round pointer changes, so a student
+  // stranded on their round-1 results re-evaluates the moment the instructor clicks "Open
+  // Round 2 Attendance" and moves to the day-2 attendance-code screen live (or on refresh).
+  // Within a round, current_round is stable, so routing still runs once per round and the
+  // per-phase components self-advance exactly as before — round-1 behaviour is unchanged.
 
   useEffect(() => {
     if (session.kind !== 'ready') return
     const { participantId, gameInstanceId } = session
     let cancelled = false
+    let lastRound: number | null = null
+    let headerLoaded = false
 
-    const run = async () => {
+    const loadHeader = (p: GamePhase) => {
+      if (headerLoaded) return
+      headerLoaded = true
+      if (p.name === 'info') { setHeaderLinks(p.links); return }
+      const fn = httpsCallable<object, GetInfoUrlsResult>(functions, 'getInfoUrls')
+      fn({}).then(({ data }) => { if (!cancelled) setHeaderLinks(data.links) }).catch(() => {})
+    }
+
+    const evaluate = async (roundIdx: number) => {
       let p: GamePhase
       try {
-        p = await routeToPhase(participantId, gameInstanceId)
+        p = await routeToPhase(participantId, gameInstanceId, roundIdx)
       } catch (err) {
         if (!cancelled) setPhase({ name: 'error', message: err instanceof Error ? err.message : 'Failed to load session.' })
         return
       }
       if (cancelled) return
       setPhase(p)
-
-      if (p.name === 'info') {
-        if (!cancelled) setHeaderLinks(p.links)
-      } else {
-        const fn = httpsCallable<object, GetInfoUrlsResult>(functions, 'getInfoUrls')
-        fn({}).then(({ data }) => { if (!cancelled) setHeaderLinks(data.links) }).catch(() => {})
-      }
+      loadHeader(p)
     }
 
-    void run()
-    return () => { cancelled = true }
+    const unsub = onSnapshot(
+      doc(db, 'game_instances', gameInstanceId),
+      (snap) => {
+        const idx = clampRoundIndex(snap.data()?.current_round)
+        if (idx === lastRound) return   // only re-route when the round pointer actually changes
+        lastRound = idx
+        void evaluate(idx)
+      },
+      () => {
+        // Instance doc unreadable (e.g. firestore rule not yet deployed) — fall back to
+        // round 1 once so a normal round-1 student is never blocked. Live day-2 re-routing
+        // requires the instance read rule (games/baxter/firestore.rules).
+        if (lastRound === null) { lastRound = 0; void evaluate(0) }
+      },
+    )
+
+    return () => { cancelled = true; unsub() }
   }, [session])
 
   // ── Render: pre-session states (no header) ────────────────────────────────

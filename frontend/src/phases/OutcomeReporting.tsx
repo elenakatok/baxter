@@ -29,6 +29,10 @@ type GroupData = {
   lead_participant_id: string
   reset_count: number | undefined
   agreement_reached: boolean | null
+  // Day-2 absence cutoff (Slice 2.7): set by beginRound2 when a group is flagged deadlocked
+  // because a whole role was absent for the round, rather than a genuine negotiation impasse.
+  day2_deadlock_reason?: string | null
+  day2_missing_roles?: string[] | null
 }
 
 type Props = {
@@ -300,13 +304,18 @@ export default function OutcomeReporting({
 
   // ── Deadlock ─────────────────────────────────────────────────────────────────
   if (status === 'deadlocked') {
+    // Cause-aware copy (Bug C). An ABSENCE deadlock (a whole role missing for day 2, flagged
+    // by beginRound2) is not a negotiation impasse, so it must NOT show the "couldn't agree
+    // after 5 attempts" message. The couldn't-agree copy is kept only for a real deadlock.
+    const absenceDeadlock = groupData.day2_deadlock_reason === 'absent_role'
     return (
       <main style={mainStyle}>
         <p style={subtitleStyle}>You are {roleLabel}</p>
         <h1 style={h1Style}>Instructor intervention needed</h1>
         <p style={{ fontSize: '1.05rem', lineHeight: 1.6, color: '#555' }}>
-          Your group could not agree after 5 attempts. Your instructor will enter the outcome manually.
-          Stay on this screen.
+          {absenceDeadlock
+            ? 'A member of your group was absent for this round, so it can’t be negotiated. Your instructor will resolve the outcome. Stay on this screen.'
+            : 'Your group could not agree after 5 attempts. Your instructor will enter the outcome manually. Stay on this screen.'}
         </p>
       </main>
     )

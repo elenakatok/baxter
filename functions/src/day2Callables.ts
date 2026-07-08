@@ -141,6 +141,8 @@ export const beginRound2 = onCall({ cors: CORS }, async (request) => {
 
     const batch = db.batch()
     const summary: Array<{ group_id: string; action: string; detail?: unknown }> = []
+    let openedCount = 0      // reopened + reassigned (groups that could actually play 1983)
+    let degenerateCount = 0  // flagged deadlocked because a whole role was absent
     for (const g of groupsSnap.docs) {
       const gdata = g.data()
       // Idempotency: only groups still closed from 1978 ('completed') are cut over. Skip any
@@ -163,11 +165,13 @@ export const beginRound2 = onCall({ cors: CORS }, async (request) => {
           day2_deadlock_reason: 'absent_role',
           day2_missing_roles: action.missingRoles,
         })
+        degenerateCount++
         summary.push({ group_id: g.id, action: 'deadlocked', detail: action.missingRoles })
       } else if (action.kind === 'reassign') {
         batch.update(g.ref, { ...reopenGroupPatch(), lead_participant_id: action.newLeadId })
         batch.update(instanceRef.collection('participants').doc(action.newLeadId), { is_lead: true })
         batch.update(instanceRef.collection('participants').doc(action.oldLeadId), { is_lead: false })
+        openedCount++
         summary.push({
           group_id: g.id,
           action: 'reassigned',
@@ -175,9 +179,30 @@ export const beginRound2 = onCall({ cors: CORS }, async (request) => {
         })
       } else {
         batch.update(g.ref, reopenGroupPatch())
+        openedCount++
         summary.push({ group_id: g.id, action: 'reopened' })
       }
     }
+
+    // All-absent guard: if every processable ('completed') group came back degenerate and NOT
+    // ONE could be opened, this is almost certainly a premature click — the code was
+    // regenerated but students have not re-confirmed 1983 attendance yet. Do NOT commit the
+    // mass-deadlock (which would strand every group and set round2_begun_at, hiding the
+    // button). Surface a legible failed-precondition instead so the instructor can wait for
+    // re-attendance and click Begin 1983 again.
+    if (openedCount === 0 && degenerateCount > 0) {
+      throw new HttpsError(
+        'failed-precondition',
+        'No groups could be opened — all students are absent for round 2. Regenerate the ' +
+          'attendance code, have students re-confirm, then Begin 1983 again.',
+      )
+    }
+
+    // Persistent "round 2 has begun" marker on the instance doc. The dashboard gates the
+    // "Begin 1983" button on this (not on transient group statuses) so it never re-appears
+    // after the 1983 round finishes and re-opens groups back to 'completed' (Bug B loop).
+    batch.set(instanceRef, { round2_begun_at: admin.firestore.FieldValue.serverTimestamp() }, { merge: true })
+
     await batch.commit()
     return { ok: true as const, round_id: ROUNDS[currentIdx], groups: summary }
   } catch (err) {

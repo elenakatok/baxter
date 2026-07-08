@@ -2,6 +2,18 @@ rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
 
+    // The instance doc itself carries only non-sensitive class state: current_round
+    // (day-2 round pointer), the finalized markers, and game_instance_id. Any authenticated
+    // participant OR the instructor may read it so a student stuck on their round-1 results
+    // can detect the round advance and re-route to day-2 re-attendance (Slice 1 day-2 fix),
+    // and the instructor dashboard can read the round pointer + round2_begun_at. Sensitive
+    // data (the attendance code, the game config) lives in separately-denied subcollections.
+    // Mirrors the existing groups rule's "any authenticated user may read" posture.
+    match /game_instances/{instanceId} {
+      allow read: if request.auth != null;
+      allow write: if false;
+    }
+
     match /game_instances/{instanceId}/participants/{participantId} {
       // Students can read their own record.
       allow read: if request.auth != null && request.auth.uid == participantId;
