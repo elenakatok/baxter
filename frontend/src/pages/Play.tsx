@@ -2,7 +2,7 @@ import React, { useEffect, useRef, useState } from 'react'
 import { doc, getDoc, onSnapshot } from 'firebase/firestore'
 import { httpsCallable } from 'firebase/functions'
 import { auth, db, rtdb, functions } from '../firebase'
-import { assignRole, confirmReady, verifyAttendanceCode, CLASSROOM_URL } from '../api'
+import { assignRole, completePrep, confirmReady, verifyAttendanceCode, CLASSROOM_URL } from '../api'
 import {
   useStudentSession,
   KnowledgeCheck,
@@ -39,6 +39,22 @@ type GamePhase =
   | { name: 'off-platform';    groupId: string }
   | { name: 'outcome-reporting'; groupId: string; isLead: boolean }
   | { name: 'results';         groupId: string }
+
+// Linear rank of the student's phase progression. Consulted ONLY by the reactive router's
+// backward-route guard (see evaluate()): it blocks a re-fired evaluate() from bouncing a student
+// who has locally advanced (e.g. confirmation → attendance-code) back to an earlier screen. It is
+// NOT consulted for legitimate day-2 round-change re-routes — those intentionally move a
+// completed-round student to the next round's attendance screen, which ranks EARLIER, and are
+// allowed through via the roundChanged bypass. group-reveal and day2-hold are the two mutually
+// exclusive post-waiting-room screens (round 1 vs day 2) and share a rank.
+const PHASE_ORDER: GamePhase['name'][] = [
+  'loading', 'error', 'info', 'kc', 'prep', 'hold', 'confirmation', 'attendance-code',
+  'waiting-room', 'group-reveal', 'day2-hold', 'off-platform', 'outcome-reporting', 'results',
+]
+function phaseRank(name: GamePhase['name']): number {
+  const i = PHASE_ORDER.indexOf(name)
+  return i < 0 ? 0 : i
+}
 
 // ── Phase routing ─────────────────────────────────────────────────────────────
 
@@ -238,6 +254,10 @@ export default function Play() {
   const testGid = import.meta.env.DEV ? p.get('_gid') : null
 
   const [phase, setPhase]             = useState<GamePhase>({ name: 'loading' })
+  // Latest phase, readable synchronously inside the async router evaluate() closure without a
+  // stale capture. Assigned every render (safe: it mirrors state, no external side effect).
+  const phaseRef = useRef(phase)
+  phaseRef.current = phase
   const [currentRound, setCurrentRound] = useState(0)
   const [headerLinks, setHeaderLinks] = useState<InfoPageLink[] | null>(null)
   const [confError,   setConfError]   = useState<string | null>(null)
@@ -285,7 +305,7 @@ export default function Play() {
       fn({}).then(({ data }) => { if (!cancelled) setHeaderLinks(data.links) }).catch(() => {})
     }
 
-    const evaluate = async (roundIdx: number, round2Begun: boolean) => {
+    const evaluate = async (roundIdx: number, round2Begun: boolean, roundChanged: boolean) => {
       let p: GamePhase
       try {
         p = await routeToPhase(participantId, gameInstanceId, roundIdx, round2Begun)
@@ -294,6 +314,14 @@ export default function Play() {
         return
       }
       if (cancelled) return
+      // Backward-route guard (product hardening). A re-fired evaluate() for the SAME round must
+      // never bounce a student who has locally advanced back to an earlier screen — e.g. a
+      // duplicate round-0 evaluation (React StrictMode double-invoke in dev, or any re-subscribe)
+      // computing 'confirmation' after the student already reached 'attendance-code', which would
+      // otherwise strand them on a frozen "Confirming…" button. Only guard when this is NOT a
+      // round change: a legitimate day-2 re-route (roundChanged) moves a completed-round student
+      // to the next round's attendance screen, which ranks EARLIER, and MUST still fire.
+      if (!roundChanged && phaseRank(p.name) < phaseRank(phaseRef.current.name)) return
       setPhase(p)
       loadHeader(p)
     }
@@ -305,14 +333,18 @@ export default function Play() {
         const round2Begun = snap.data()?.round2_begun_at != null
         setCurrentRound(idx)              // keep render-scope round fresh (waiting-room routing)
         if (idx === lastRound) return     // only re-route when the round pointer actually changes
+        // roundChanged is true only when we've already routed a PRIOR round (lastRound set) and the
+        // pointer has now advanced — i.e. a genuine day-2 re-route that must bypass the backward
+        // guard. The first evaluation (lastRound === null) is the initial route, never a change.
+        const roundChanged = lastRound !== null
         lastRound = idx
-        void evaluate(idx, round2Begun)
+        void evaluate(idx, round2Begun, roundChanged)
       },
       () => {
         // Instance doc unreadable (e.g. firestore rule not yet deployed) — fall back to
         // round 1 once so a normal round-1 student is never blocked. Live day-2 re-routing
         // requires the instance read rule (games/baxter/firestore.rules).
-        if (lastRound === null) { lastRound = 0; void evaluate(0, false) }
+        if (lastRound === null) { lastRound = 0; void evaluate(0, false, false) }
       },
     )
 
@@ -365,7 +397,12 @@ export default function Play() {
     setConfLoading(true)
     setConfError(null)
     confirmReady({})
-      .then(() => setPhase({ name: 'attendance-code' }))
+      .then(() => {
+        // Reset the loading flag on success too — otherwise, if anything routes the student back
+        // to this screen after a successful confirm, the button stays frozen on "Confirming…".
+        setConfLoading(false)
+        setPhase({ name: 'attendance-code' })
+      })
       .catch((err: unknown) => {
         setConfError(err instanceof Error ? err.message : 'Something went wrong. Please try again.')
         setConfLoading(false)
@@ -379,7 +416,15 @@ export default function Play() {
     setCodeLoading(true)
     setCodeError(null)
     verifyAttendanceCode({}, code)
-      .then(() => setPhase({ name: 'waiting-room' }))
+      .then(() => {
+        // Reset the loading flag AND clear the entered code on success. codeLoading/codeValue are
+        // Play-level state that survives phase changes, so leaving them set freezes and pre-fills
+        // the attendance input the NEXT time it appears — i.e. a day-2 returning student would find
+        // the box disabled and still holding their round-1 code.
+        setCodeLoading(false)
+        setCodeValue('')
+        setPhase({ name: 'waiting-room' })
+      })
       .catch((err: unknown) => {
         setCodeError(err instanceof Error ? err.message : 'Something went wrong. Please try again.')
         setCodeLoading(false)
@@ -417,7 +462,11 @@ export default function Play() {
           gameInstanceId={gameInstanceId}
           functions={functions}
           db={db}
-          onComplete={() => setPhase({ name: 'hold' })}
+          // Baxter has no prep questions, so PrepQuestions auto-skips WITHOUT persisting
+          // prep_status. Persist it ourselves (idempotent, non-blocking) so the router's phase-2
+          // gate opens on later re-evaluations — without this, the day-2 re-route bounces the
+          // student back through prep → hold instead of forward to the attendance-code screen.
+          onComplete={() => { void completePrep({}).catch(() => {}); setPhase({ name: 'hold' }) }}
         />
       )}
 

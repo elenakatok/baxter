@@ -195,23 +195,16 @@ async function driveToWaiting(s, code) {
   log(pid, '★ waiting room')
 }
 
-// ── Day-2 re-attendance: drive a re-routing student to the code screen, then enter the code ──
-// Matches the manual flow: after "Open Round 2 Attendance" the student leaves the results
-// screen and heads toward re-attendance. Depending on state it may pass through the
-// "Preparation complete" hold and/or the "Ready to negotiate?" confirmation before the code
-// screen — click through whichever appear (tolerant), then submit the 1983 code.
+// ── Day-2 re-attendance: wait for the live re-route to the code screen, then enter the code ──
+// Corrected product behavior (Elena's manual walk + the confirmation re-entrancy fix): after the
+// instructor clicks "Open Round 2 Attendance", the reactive router moves the student straight from
+// their 1978 results to the "Enter attendance code" screen. There is NO "Preparation complete"
+// hold and NO "Ready to negotiate?" confirmation in the day-2 path — that confirmation is
+// round-1-only. So we simply wait for the code screen (allowing time for the live re-route) and
+// submit. If the product ever bounced a re-attending student to confirmation again, this WOULD
+// time out — that's intentional: the harness asserts the corrected flow, it does not paper over it.
 async function reAttend(page, pid, code) {
-  for (let i = 0; i < 8; i++) {
-    if (await page.locator('h1:has-text("Enter attendance code")').isVisible().catch(() => false)) break
-    if (await page.locator('button:has-text("in class")').isVisible().catch(() => false)) {
-      await page.click('button:has-text("in class")'); await sleep(400); continue
-    }
-    if (await page.locator("button:has-text(\"Yes, I'm ready\")").isVisible().catch(() => false)) {
-      await page.click("button:has-text(\"Yes, I'm ready\")"); await sleep(400); continue
-    }
-    await sleep(1000)
-  }
-  await page.waitForSelector('h1:has-text("Enter attendance code")', { timeout: 20_000 })
+  await page.waitForSelector('h1:has-text("Enter attendance code")', { timeout: 30_000 })
   await page.locator('input').fill(code)
   await page.click('button[type="submit"]')
   log(pid, 're-attended for 1983')
