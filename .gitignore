@@ -50,3 +50,6 @@ yarn-error.log*
 
 # Local emulator state
 emulator-data/
+
+# Playwright playthrough diagnostics (screenshots on failure)
+playthrough-artifacts/

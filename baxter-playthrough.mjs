@@ -29,6 +29,8 @@
  */
 
 import { chromium } from 'playwright'
+import { mkdirSync } from 'node:fs'
+import path from 'node:path'
 import {
   SCHEME_1978,
   CANONICAL_1978_OUTCOME,
@@ -62,6 +64,45 @@ const banner = msg => console.log('\n' + '─'.repeat(66) + '\n' + msg + '\n' + 
 function assert(cond, name) {
   if (cond) { PASS++; console.log(`  ✓ ASSERT: ${name}`) }
   else      { FAIL++; console.log(`  ✗ ASSERT FAILED: ${name}`) }
+}
+
+// ── On-failure diagnostics (DIAGNOSTIC ONLY — never affects pass/fail) ──────────
+// On any assertion timeout/throw, or any run that ends with failures, dump each live
+// page's actual visible <h1> heading + URL and a full-page screenshot, so a failing run
+// tells us definitively which screen every student/the dashboard is stuck on.
+
+let browser = null
+const students = []           // { page, pid, role } — populated as students are set up
+let dash = null               // instructor dashboard page
+const ARTIFACT_DIR = path.resolve(process.cwd(), 'playthrough-artifacts', GID)
+
+async function headingText(page) {
+  try {
+    const hs = (await page.locator('h1').allTextContents()).map(h => h.trim()).filter(Boolean)
+    return hs.length ? hs.join(' | ') : '(no <h1> visible)'
+  } catch { return '(could not read <h1>)' }
+}
+
+async function dumpDiagnostics(reason) {
+  console.log('\n' + '═'.repeat(66))
+  console.log('DIAGNOSTIC DUMP — ' + reason)
+  console.log('═'.repeat(66))
+  try { mkdirSync(ARTIFACT_DIR, { recursive: true }) } catch { /* best effort */ }
+  const targets = [
+    ...students.map(s => ({ label: s.pid, page: s.page })),
+    ...(dash ? [{ label: 'dashboard', page: dash }] : []),
+  ]
+  for (const { label, page } of targets) {
+    if (!page) continue
+    const heading = await headingText(page)
+    let url = '(unknown)'; try { url = page.url() } catch { /* page may be closed */ }
+    let shot = path.join(ARTIFACT_DIR, `${label}.png`)
+    try { await page.screenshot({ path: shot, fullPage: true }) } catch (e) { shot = `(screenshot failed: ${e.message})` }
+    console.log(`  [${label}]  heading: ${heading}`)
+    console.log(`  ${' '.repeat(label.length)}   url: ${url}`)
+    console.log(`  ${' '.repeat(label.length)}   shot: ${shot}`)
+  }
+  console.log('═'.repeat(66) + '\n')
 }
 
 // ── Emulator callable + Firestore helpers ──────────────────────────────────────
@@ -212,10 +253,9 @@ async function main() {
   await inst('updateScheme1978', { scheme1978: SCHEME_1978 })
   log('seed', 'scheme1978 written (85/62 baseline)')
 
-  const browser = await chromium.launch({ headless: !HEADED, slowMo: SLOWMO })
+  browser = await chromium.launch({ headless: !HEADED, slowMo: SLOWMO })
 
   // 1. Setup all 4 students (sequential → deterministic 2 Baxter / 2 Local 190 role balance).
-  const students = []
   for (const pid of PIDS) {
     const ctx = await browser.newContext()
     students.push(await driveSetup(await ctx.newPage(), pid))
@@ -229,7 +269,7 @@ async function main() {
   await Promise.all(students.map(s => driveToWaiting(s, code)))
 
   // 3. Open the instructor dashboard (its own context) — used for #1/B assertions + the two gates.
-  const dash = await (await browser.newContext()).newPage()
+  dash = await (await browser.newContext()).newPage()
   await dash.goto(dashboardUrl())
   await dash.waitForSelector('text=Round 1', { timeout: 30_000 }).catch(() => {})
 
@@ -312,9 +352,18 @@ async function main() {
   console.log('\n  TODO(Slice 3): assert wage-only 1983 report form — not built yet, not run.')
 
   banner(`RESULT — ${PASS} passed, ${FAIL} failed`)
+  // Any non-throwing assertion failures still get a full page/heading/screenshot dump.
+  if (FAIL > 0) await dumpDiagnostics(`${FAIL} assertion(s) failed`)
   if (!HEADED) await browser.close()
   else { console.log('HEADED mode — leaving browser open. Ctrl+C to exit.'); await sleep(600_000); await browser.close() }
   process.exit(FAIL === 0 ? 0 : 1)
 }
 
-main().catch(err => { console.error('\nFatal:', err); process.exit(1) })
+// A thrown error (e.g. a waitForSelector TIMEOUT — "the stuck student") lands here: dump every
+// live page's heading + screenshot before exiting so we can see which screen each is stuck on.
+main().catch(async err => {
+  console.error('\nFatal:', err?.message ?? err)
+  await dumpDiagnostics('fatal error / timeout: ' + (err?.message ?? err)).catch(() => {})
+  try { if (browser && !HEADED) await browser.close() } catch { /* ignore */ }
+  process.exit(1)
+})
