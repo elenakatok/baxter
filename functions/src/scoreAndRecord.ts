@@ -18,6 +18,7 @@ import {
 import { baxterGameDef } from './gameDefinition'
 import { wage78FromOutcome, wage83FromOutcome, classAvg1983, adjustmentPct, type BaxterRole } from './transform1983'
 import { score1985, baxterNoDeal1985, UNION_1985_NO_DEAL } from './score1985'
+import { isRatified1978, baxterNoDeal1978, BaxterNoDeal1978Degenerate } from './ratification1978'
 
 // Same per-game secret finalize uses, so the CLI provisions it for this function too.
 const classroomCallbackSecret = defineSecret('CLASSROOM_CALLBACK_SECRET')
@@ -181,8 +182,43 @@ export const scoreAndRecord = onCall({ cors: def.corsOrigins, secrets: [classroo
       if (record !== null) records.push(record)
     }
 
-    // Normalize: per-role pools, sample SD, cost-sense, no_show→-2, walk-away in-pool.
-    const scorer = (role: string, outcome: Outcome | null) => def.computeRawScore(role, outcome, configData)
+    // ── 1978 ratification + no-deal pre-pass (GAME-SPECIFIC, cross-group, spec §3) ──────
+    // Ratification is a HARD DETERMINISTIC rule: a 1978 deal counts only if Location=Deloitte AND
+    // Transfer≥Most (isRatified1978). A deal that FAILS ratification is scored as a 1978 NO-DEAL —
+    // identical to an explicit walk-away / ultimatum-reject. 1978 no-deal: Baxter = (minimum 1978
+    // score among Baxters who reached AND ratified a deal) + 5 [cross-group]; Union = 0. The min
+    // uses ONLY ratified Baxter deals (a group's flat round-1 `outcome` holds the 1978 deal).
+    const ratifiedBaxterScores: number[] = []
+    for (const cg of completedGroups.values()) {
+      if (isRatified1978(cg.outcome)) ratifiedBaxterScores.push(def.computeRawScore('baxter', cg.outcome, configData))
+    }
+    // A Baxter needs the no-deal value iff its group did not reach a ratified deal.
+    const hasBaxterNoDeal = participantsSnap.docs.some(pd => {
+      const d = pd.data(); const gid = d['group_id']
+      const ratified = typeof gid === 'string' && completedGroups.has(gid) && isRatified1978(completedGroups.get(gid)!.outcome)
+      return d['role'] === 'baxter' && !ratified
+    })
+    // Degenerate: a Baxter no-deal is needed but NOBODY ratified → "min + 5" is undefined. Do NOT
+    // invent a number — surface it as a clear failed-precondition (an OPEN QUESTION for Elena: the
+    // 1985 degenerate resolved to a flat reservation value; 1978 has none) rather than writing NaN.
+    // Only computed when actually needed.
+    let baxterNoDeal1978Value: number | null = null
+    if (hasBaxterNoDeal) {
+      try {
+        baxterNoDeal1978Value = baxterNoDeal1978(ratifiedBaxterScores)
+      } catch (e) {
+        if (e instanceof BaxterNoDeal1978Degenerate) throw new HttpsError('failed-precondition', e.message)
+        throw e
+      }
+    }
+
+    // 1978 base scorer: a RATIFIED deal keeps its summed option score; a no-deal / failed-
+    // ratification group scores as no-deal (Baxter min+5, Union 0). Replaces the plain option-sum
+    // scorer. Per-role pools, sample SD, cost-sense, no_show→-2, walk-away in-pool otherwise.
+    const scorer = (role: string, outcome: Outcome | null) => {
+      if (isRatified1978(outcome as Record<string, unknown> | null)) return def.computeRawScore(role, outcome, configData)
+      return role === 'baxter' ? (baxterNoDeal1978Value as number) : 0
+    }
     const finalizedBase = computeZScoresByRole(records, def.roles, def.scoreSense, scorer)
 
     // Final pass: raw_score = 1978 base + offset (1983 adjustment + 1985 score), then re-z within

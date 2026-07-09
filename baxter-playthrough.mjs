@@ -48,14 +48,18 @@ const SLOWMO        = process.env.SLOWMO ? Number(process.env.SLOWMO) : 0
 
 // A fresh instance id per run so re-runs never collide. (Date.now is fine in a plain script.)
 const GID = process.env.GID ?? `pt-${Date.now()}`
-// THREE groups (Bug E): 12 students → 6 Baxter + 6 Local 190 → three groups of 2+2.
-//   • Two DEALER groups reach a 1978 deal (ACCEPT), then in 1983 one agrees a wage (form +
-//     submit + cross-group transform) and one no-deals → arbitration.
-//   • One REJECTER group hits the 1978 ULTIMATUM reject → terminal no-deal (no redo). It sits
-//     idle in 1983 (excluded from the cross-group average).
+// FOUR groups (Slice 5): 16 students → 8 Baxter + 8 Local 190 → four groups of 2+2.
+//   • Two RATIFIED DEALER groups (A,B) reach a 1978 deal that PASSES ratification (canonical:
+//     Location=Deloitte, Transfer=Most). They drive the 1983 transform (A agrees $9.50; B no-deals
+//     → arbitration $8.67) and the 1985 round (A deals Deal B; B ultimatum-rejects).
+//   • One REJECTER group (C) hits the 1978 ULTIMATUM reject → terminal no-deal (Bug E). Idle after.
+//   • One FAILED-RATIFICATION dealer (D) reaches a 1978 DEAL but with Transfer=Some → NOT ratified
+//     → scored as a 1978 no-deal (Slice 5), exactly like C. Idle in 1983/1985.
+// C and D both exercise the 1978 no-deal scoring (Baxter = min RATIFIED-Baxter + 5; Union = 0);
+// D also proves the min uses ONLY ratified deals (its own lower deal sum is excluded).
 const PIDS = [
-  'stu-1', 'stu-2', 'stu-3', 'stu-4', 'stu-5', 'stu-6',
-  'stu-7', 'stu-8', 'stu-9', 'stu-10', 'stu-11', 'stu-12',
+  'stu-1', 'stu-2', 'stu-3', 'stu-4', 'stu-5', 'stu-6', 'stu-7', 'stu-8',
+  'stu-9', 'stu-10', 'stu-11', 'stu-12', 'stu-13', 'stu-14', 'stu-15', 'stu-16',
 ]
 
 const ROLE_RADIO = {
@@ -264,13 +268,33 @@ async function reAttend(page, pid, code) {
 
 const ISSUE_ORDER = ['wages', 'plant_operation', 'escalator', 'incentive', 'location', 'transfer']
 
-/** Lead fills the six 1978 <select>s with the canonical deal (does NOT submit). */
-async function fillCanonical1978(leadPage) {
+// A 1978 deal that FAILS ratification: Transfer=Some (< Most) so the deterministic gate rejects it,
+// plus wages=above_top3 to give it a DISTINCT (lower) Baxter deal sum (80) than the ratified deals
+// (85) — so the harness can prove the min+5 excludes this unratified deal (it scores 90, not 85/80).
+const FAIL_RATIFY_1978_OUTCOME = { ...CANONICAL_1978_OUTCOME, wages: 'above_top3', transfer: 'some' }
+
+/** Lead fills the six 1978 <select>s with a given outcome (does NOT submit). */
+async function fill1978(leadPage, outcome) {
   await leadPage.waitForSelector('h1:has-text("Report outcome")', { timeout: 30_000 })
   const selects = leadPage.locator('select')
   for (let i = 0; i < ISSUE_ORDER.length; i++) {
-    await selects.nth(i).selectOption(CANONICAL_1978_OUTCOME[ISSUE_ORDER[i]])
+    await selects.nth(i).selectOption(outcome[ISSUE_ORDER[i]])
   }
+}
+const fillCanonical1978 = leadPage => fill1978(leadPage, CANONICAL_1978_OUTCOME)
+
+/** Lead reports a 1978 deal (fills + reviews + submits); non-leads all Confirm (accept). */
+async function drive1978Deal(members, outcome) {
+  const lead = members.find(m => m.is_lead) ?? members[0]
+  const nonLeads = members.filter(m => m !== lead)
+  await fill1978(lead.page, outcome)
+  await lead.page.click('button:has-text("Review & submit")')
+  await lead.page.waitForSelector('h1:has-text("Confirm outcome")', { timeout: 10_000 })
+  await lead.page.click('button:has-text("Yes, submit")')
+  await Promise.all(nonLeads.map(async s => {
+    await s.page.waitForSelector('h1:has-text("Confirm")', { timeout: 30_000 })
+    await s.page.click('button:has-text("Confirm")')
+  }))
 }
 
 // ── 1985 six-issue contract (Slice 4) — one wage input + five option selects (schema order) ──
@@ -290,7 +314,7 @@ async function fill1985(leadPage, contract) {
 }
 
 async function drive1978Negotiation(students) {
-  banner('1978 negotiation → 2 groups ACCEPT (deal), 1 group ULTIMATUM-REJECTS')
+  banner('1978 negotiation → 2 RATIFIED dealers (A,B), 1 REJECTER (C), 1 FAILED-RATIFICATION dealer (D)')
   // group reveal
   await Promise.all(students.map(async s => {
     await s.page.waitForSelector('h1:has-text("Your negotiation group")', { timeout: 60_000 })
@@ -309,33 +333,19 @@ async function drive1978Negotiation(students) {
   const parts = await readParticipants()
   const groups = groupStudents(students, parts)
   const gids = Object.keys(groups).sort()
-  const rejectGid = gids[gids.length - 1]           // last group is the ultimatum-rejecter
-  const dealerGids = gids.filter(g => g !== rejectGid)
-  log('1978', `${gids.length} groups — dealers=${dealerGids.join(',')} · rejecter=${rejectGid}`)
+  // Deterministic role split: last group = rejecter (C); second-last = failed-ratification dealer
+  // (D); the rest = ratified dealers (A,B). (4 groups → ratified=[g0,g1], D=g2, C=g3.)
+  const rejectGid = gids[gids.length - 1]
+  const failRatifyGid = gids[gids.length - 2]
+  const ratifiedGids = gids.filter(g => g !== rejectGid && g !== failRatifyGid)
+  log('1978', `${gids.length} groups — ratified=${ratifiedGids.join(',')} · failRatify=${failRatifyGid} · rejecter=${rejectGid}`)
 
-  // DEALER groups: lead reports the canonical deal; all non-leads Confirm (accept) → deal.
-  // Under the 1978 ULTIMATUM this all-accept path is exactly the 'committed' deal branch.
-  await Promise.all(dealerGids.map(async gid => {
-    const members = groups[gid]
-    const lead = members.find(m => m.is_lead) ?? members[0]
-    const nonLeads = members.filter(m => m !== lead)
-    await fillCanonical1978(lead.page)
-    await lead.page.click('button:has-text("Review & submit")')
-    await lead.page.waitForSelector('h1:has-text("Confirm outcome")', { timeout: 10_000 })
-    await lead.page.click('button:has-text("Yes, submit")')
-    await Promise.all(nonLeads.map(async s => {
-      await s.page.waitForSelector('h1:has-text("Confirm")', { timeout: 30_000 })
-      await s.page.click('button:has-text("Confirm")')
-    }))
-    log(gid, `dealer — 1978 deal accepted`)
-  }))
-
-  // REJECTER group (1978 ULTIMATUM): lead reports an offer, ONE receiver REJECTS. Under the
-  // ultimatum that single reject is TERMINAL no-deal — NO reset, NO redo, NO second offer.
+  // ── REJECTER group (C) FIRST (Bug E ultimatum) — its reject is a no-deal BEFORE any deal ──
+  // Lead reports an offer, ONE receiver REJECTS → TERMINAL no-deal (no reset/redo/second offer).
   const rMembers = groups[rejectGid]
   const rLead = rMembers.find(m => m.is_lead) ?? rMembers[0]
   const rNonLeads = rMembers.filter(m => m !== rLead)
-  await fillCanonical1978(rLead.page)
+  await fill1978(rLead.page, CANONICAL_1978_OUTCOME)
   await rLead.page.click('button:has-text("Review & submit")')
   await rLead.page.waitForSelector('h1:has-text("Confirm outcome")', { timeout: 10_000 })
   await rLead.page.click('button:has-text("Yes, submit")')
@@ -343,15 +353,33 @@ async function drive1978Negotiation(students) {
   await rejecter.page.waitForSelector('h1:has-text("Confirm")', { timeout: 30_000 })
   await rejecter.page.click('button:has-text("Reject")')
   log(rejectGid, `rejecter ${rejecter.pid} clicked Reject (1978 ultimatum)`)
+  await pollGroupsFull(g => g.find(x => x.id === rejectGid)?.status === 'completed', 30_000)
 
-  // Wait: dealers completed (deal); rejecter completed with NO deal.
-  const gs = await pollGroupsFull(g => {
-    const rj = g.find(x => x.id === rejectGid)
-    return rj && rj.status === 'completed' && dealerGids.every(id => g.find(x => x.id === id)?.status === 'completed')
-  }, 40_000)
+  // ── DEGENERATE probe (Slice 5): score NOW — C is a no-deal Baxter but ZERO groups have a
+  // ratified deal yet → "min ratified + 5" is undefined → scoreAndRecord MUST error (not NaN). ──
+  let degenThrew = false
+  try { await inst('scoreAndRecord') } catch { degenThrew = true }
+  assert(degenThrew,
+    '1978 DEGENERATE guard — scoreAndRecord ERRORS when a Baxter no-deal exists but 0 ratified deals (no silent NaN; Elena fallback TBD)')
+
+  // ── RATIFIED dealers (A,B): canonical deal (Location=Deloitte, Transfer=Most) → ratifies ──
+  await Promise.all(ratifiedGids.map(async gid => {
+    await drive1978Deal(groups[gid], CANONICAL_1978_OUTCOME)
+    log(gid, 'ratified dealer — canonical 1978 deal accepted')
+  }))
+
+  // ── FAILED-RATIFICATION dealer (D): a real DEAL, but Transfer=Some → gate rejects → no-deal ──
+  await drive1978Deal(groups[failRatifyGid], FAIL_RATIFY_1978_OUTCOME)
+  log(failRatifyGid, 'failed-ratification dealer — 1978 DEAL accepted (Transfer=Some → NOT ratified)')
+
+  // Wait: ratified dealers completed (deal); rejecter + failed-ratify completed.
+  const gs = await pollGroupsFull(g =>
+    [...ratifiedGids, failRatifyGid, rejectGid].every(id => g.find(x => x.id === id)?.status === 'completed'), 40_000)
   const rj = gs.find(x => x.id === rejectGid)
-  assert(dealerGids.every(id => gs.find(x => x.id === id)?.status === 'completed' && gs.find(x => x.id === id)?.agreement === true),
-    '1978 ACCEPT — dealer groups reach a "completed" DEAL')
+  assert(ratifiedGids.every(id => gs.find(x => x.id === id)?.status === 'completed' && gs.find(x => x.id === id)?.agreement === true),
+    '1978 ACCEPT — ratified dealer groups reach a "completed" DEAL')
+  assert(gs.find(x => x.id === failRatifyGid)?.status === 'completed' && gs.find(x => x.id === failRatifyGid)?.agreement === true,
+    '1978 FAILED-RATIFY dealer reaches a "completed" DEAL (agreement true — ratification is a scoring rule, not a lock rule)')
   assert(rj?.status === 'completed' && rj?.agreement === false,
     '1978 ULTIMATUM REJECT — reject reaches TERMINAL no-deal (completed, no agreement; not reset/deadlocked)')
   // No redo / no second offer: the reject lead must NOT be sitting on a fresh report form.
@@ -359,8 +387,8 @@ async function drive1978Negotiation(students) {
   assert(!leadOnReportForm,
     '1978 ULTIMATUM REJECT — no redo: reject lead is NOT returned to the report form (no second offer)')
 
-  const dealerMemberPids = dealerGids.flatMap(id => groups[id].map(m => m.pid))
-  return { dealerGids, rejectGid, dealerMemberPids }
+  const dealerMemberPids = ratifiedGids.flatMap(id => groups[id].map(m => m.pid))
+  return { ratifiedGids, failRatifyGid, rejectGid, dealerMemberPids }
 }
 
 // ── MAIN ──────────────────────────────────────────────────────────────────────
@@ -402,10 +430,14 @@ async function main() {
     assert(!visible, '#1 — "Open Round 2 Attendance" HIDDEN before round-1 groups complete')
   }
 
-  // 4. 1978 negotiation → 2 dealer groups deal, 1 rejecter hits the ultimatum terminal no-deal.
-  const { dealerGids, rejectGid, dealerMemberPids } = await drive1978Negotiation(students)
+  // 4. 1978 negotiation → 2 ratified dealers (A,B), 1 rejecter (C), 1 failed-ratify dealer (D).
+  const { ratifiedGids, failRatifyGid, rejectGid, dealerMemberPids } = await drive1978Negotiation(students)
 
-  // 5. Score & Record → the DEALER groups score Baxter 85 / Union 62 (the rejecter is no-deal).
+  // 5. Score & Record → RATIFIED dealers score Baxter 85 / Union 62 (their negotiated score stands).
+  //    Both no-deal groups (C reject + D failed-ratification) score the 1978 NO-DEAL: Baxter =
+  //    min RATIFIED-Baxter (85) + 5 = 90; Union = 0. D's own deal sum is 80 (Transfer=Some) — the
+  //    min EXCLUDES it (uses only ratified deals), so C and D both land on 90, NOT 85 (which is what
+  //    a bug that included D's 80 would give: 80+5) and NOT D's negotiated 80.
   await inst('scoreAndRecord')
   await sleep(1500)
   {
@@ -413,9 +445,19 @@ async function main() {
     const dealers = parts.filter(p => dealerMemberPids.includes(p.id))
     const bax = dealers.filter(p => p.role === 'baxter')
     const uni = dealers.filter(p => p.role === 'union')
+    const raws = (gid, role) => parts.filter(p => p.group_id === gid && p.role === role).map(p => p.raw_score)
+    const allEq = (arr, exp) => arr.length > 0 && arr.every(s => s === exp)
     log('score', parts.map(p => `${p.id}:${p.role}=${p.raw_score}`).join('  '))
-    assert(bax.length > 0 && bax.every(p => p.raw_score === EXPECTED_1978_SCORES.baxter), `Scoring — every dealer Baxter = ${EXPECTED_1978_SCORES.baxter}`)
-    assert(uni.length > 0 && uni.every(p => p.raw_score === EXPECTED_1978_SCORES.union),  `Scoring — every dealer Union = ${EXPECTED_1978_SCORES.union}`)
+    // RATIFIED deal → negotiated score stands.
+    assert(bax.length > 0 && bax.every(p => p.raw_score === EXPECTED_1978_SCORES.baxter), `Ratified — every ratified-dealer Baxter = ${EXPECTED_1978_SCORES.baxter}`)
+    assert(uni.length > 0 && uni.every(p => p.raw_score === EXPECTED_1978_SCORES.union),  `Ratified — every ratified-dealer Union = ${EXPECTED_1978_SCORES.union}`)
+    // FAILED-RATIFICATION deal → scored as NO-DEAL (Baxter 90 = min-ratified 85 + 5; Union 0), NOT
+    // the negotiated deal (Baxter 80 / Union ≠0). This is the core Slice-5 ratification assertion.
+    assert(allEq(raws(failRatifyGid, 'baxter'), 90), '1978 FAILED-RATIFY → no-deal — Baxter = min-ratified 85 + 5 = 90 (NOT its negotiated deal sum 80)')
+    assert(allEq(raws(failRatifyGid, 'union'), 0),  '1978 FAILED-RATIFY → no-deal — Union = 0 (NOT its negotiated deal score)')
+    // Explicit REJECT → same no-deal scoring.
+    assert(allEq(raws(rejectGid, 'baxter'), 90), '1978 REJECT → no-deal — Baxter = min-ratified 85 + 5 = 90')
+    assert(allEq(raws(rejectGid, 'union'), 0),  '1978 REJECT → no-deal — Union = 0')
   }
 
   // #1 (part b): now that round 1 is completed, the gate button appears → drive it.
@@ -472,9 +514,10 @@ async function main() {
 
   const parts83 = await readParticipants()
   const groups83 = groupStudents(students, parts83)
-  // A/B are the two DEALER groups (they have a 1978 wage); the rejecter (C) stays idle in 1983.
-  const [gidA, gidB] = dealerGids
-  log('1983', `group A=${gidA} (redo→$9.50) · group B=${gidB} (no deal→arbitration) · idle rejecter=${rejectGid}`)
+  // A/B are the two RATIFIED dealer groups (they have a 1978 wage); C (rejecter) + D (failed-ratify)
+  // stay idle here and complete 1983 as no-deals below so the class can proceed to 1985.
+  const [gidA, gidB] = ratifiedGids
+  log('1983', `group A=${gidA} (redo→$9.50) · group B=${gidB} (no deal→arbitration) · idle C=${rejectGid} D=${failRatifyGid}`)
 
   // Group A — wage-only form: assert ONLY the wage field renders. Then exercise the 1983
   // STANDARD ACCEPT/REDO loop (unchanged — 1983 is NOT ultimatum): first offer $9.50 is
@@ -592,25 +635,27 @@ async function main() {
   }
 
   // ══ 1985 (Slice 4) — own six-issue contract, ultimatum, additive final ═══════════
-  // Group C (the 1978-rejecter) has stayed idle through 1983. To advance the whole class to
-  // 1985 (advanceRound requires EVERY group completed), C completes 1983 as a NO-DEAL. It gets
-  // NO 1983 wage → excluded from w83_avg (the transform numbers above are unaffected), and its
-  // 1983 arbitration is deliberately LEFT UNRESOLVED (resolving would give it a wage and shift the
-  // average). C also walked away in 1978 → its adjusted-1978 base is 0, which isolates its 1985
-  // component for a clean degenerate-guard read below.
+  // Groups C (1978-rejecter) and D (1978 failed-ratification) have stayed idle through 1983. To
+  // advance the whole class to 1985 (advanceRound requires EVERY group completed), both complete
+  // 1983 as NO-DEALS. They get NO 1983 wage → excluded from w83_avg (the transform numbers above
+  // are unaffected), and their 1983 arbitrations are deliberately LEFT UNRESOLVED (resolving would
+  // give a wage and shift the average). C and D both carry a 1978 NO-DEAL base of 90 (min-ratified
+  // 85 + 5), so their 1985 numbers below are 90 + the 1985 component.
   banner('1985 — proceed 1983→1985, then own six-issue contract (ultimatum + additive final)')
   {
-    const gC = groups83[rejectGid]; const leadC = gC.find(m => m.is_lead) ?? gC[0]; const nonC = gC.filter(m => m !== leadC)
-    await leadC.page.waitForSelector('h1:has-text("Report outcome")', { timeout: 30_000 })
-    await leadC.page.click('button:has-text("No deal")')
-    await leadC.page.waitForSelector('h1:has-text("Confirm no deal")', { timeout: 10_000 })
-    await leadC.page.click('button:has-text("Yes, no deal")')
-    await Promise.all(nonC.map(async s => {
-      await s.page.waitForSelector('h1:has-text("Confirm")', { timeout: 30_000 })
-      await s.page.click('button:has-text("Confirm")')
-    }))
-    await pollGroupsFull(g => [gidA, gidB, rejectGid].every(id => g.find(x => x.id === id)?.status === 'completed'), 30_000)
-    log('1983', `group C (${rejectGid}) no-dealed 1983 → all three groups completed; ready to proceed`)
+    for (const gid of [rejectGid, failRatifyGid]) {
+      const g = groups83[gid]; const lead = g.find(m => m.is_lead) ?? g[0]; const non = g.filter(m => m !== lead)
+      await lead.page.waitForSelector('h1:has-text("Report outcome")', { timeout: 30_000 })
+      await lead.page.click('button:has-text("No deal")')
+      await lead.page.waitForSelector('h1:has-text("Confirm no deal")', { timeout: 10_000 })
+      await lead.page.click('button:has-text("Yes, no deal")')
+      await Promise.all(non.map(async s => {
+        await s.page.waitForSelector('h1:has-text("Confirm")', { timeout: 30_000 })
+        await s.page.click('button:has-text("Confirm")')
+      }))
+    }
+    await pollGroupsFull(g => [gidA, gidB, rejectGid, failRatifyGid].every(id => g.find(x => x.id === id)?.status === 'completed'), 30_000)
+    log('1983', `groups C (${rejectGid}) + D (${failRatifyGid}) no-dealed 1983 → all four completed; ready to proceed`)
   }
 
   // Proceed 1983→1985 (same-session generic advanceRound: re-opens every group; day-2 presence
@@ -654,22 +699,26 @@ async function main() {
       '1985 ULTIMATUM REJECT — no redo: lead is NOT returned to the report form (distinct from 1983 redo)')
   }
 
-  // DEGENERATE pass — score BEFORE any group deals 1985 (B rejected → no-deal; A & C idle). The
-  // re-runnable scorer must apply the degenerate-pool guard: Baxter no-deal = 50, Union = 60.
+  // DEGENERATE pass — score BEFORE any group deals 1985 (B rejected → no-deal; A, C, D idle). The
+  // re-runnable scorer must apply the 1985 degenerate-pool guard: Baxter no-deal = 50, Union = 60.
   await inst('scoreAndRecord')
   await sleep(1500)
   {
     const parts = await readParticipants()
     const raws = (gid, role) => parts.filter(p => p.group_id === gid && p.role === role).map(p => p.raw_score)
     const all = (arr, exp) => arr.length > 0 && arr.every(s => near(s, exp, 0.1))
-    log('1985°', parts.filter(p => [gidA, gidB, rejectGid].includes(p.group_id))
-      .map(p => `${p.id}:${p.group_id === gidA ? 'A' : p.group_id === gidB ? 'B' : 'C'}/${p.role}=${p.raw_score}`).join('  '))
-    // Group C walked away in 1978+1983 → adjusted-1978 = 0, isolating the 1985 component.
-    assert(all(raws(rejectGid, 'baxter'), 50),
-      '1985 DEGENERATE guard — 0 dealers → Baxter no-deal = 50 (group C: 0 + 50)')
-    assert(all(raws(rejectGid, 'union'), 60),
-      '1985 Union no-deal = 60 (group C: 0 + 60)')
-    // Group B Baxter = adjusted-1978 (89.6) + 50 degenerate = 139.6.
+    const tag = gid => gid === gidA ? 'A' : gid === gidB ? 'B' : gid === rejectGid ? 'C' : 'D'
+    log('1985°', parts.filter(p => [gidA, gidB, rejectGid, failRatifyGid].includes(p.group_id))
+      .map(p => `${p.id}:${tag(p.group_id)}/${p.role}=${p.raw_score}`).join('  '))
+    // C and D carry a 1978 NO-DEAL base of 90 (min-ratified 85 + 5); no 1983 wage → no adjustment.
+    //   C/D Baxter = 90 + 50 (1985 degenerate) = 140    C/D Union = 0 + 60 = 60
+    for (const [gid, lbl] of [[rejectGid, 'C'], [failRatifyGid, 'D']]) {
+      assert(all(raws(gid, 'baxter'), 140),
+        `1985 DEGENERATE guard — 0 dealers → Baxter no-deal 50; group ${lbl} = 1978-no-deal 90 + 50 = 140`)
+      assert(all(raws(gid, 'union'), 60),
+        `1985 Union no-deal = 60; group ${lbl} Union = 1978-no-deal 0 + 60 = 60`)
+    }
+    // Group B (ratified 1978) Baxter = adjusted-1978 (89.6) + 50 degenerate = 139.6.
     assert(all(raws(gidB, 'baxter'), 139.6),
       '1985 DEGENERATE — group B Baxter = adjusted-1978 89.6 + 50 = 139.6')
   }
@@ -697,8 +746,9 @@ async function main() {
     const parts = await readParticipants()
     const raws = (gid, role) => parts.filter(p => p.group_id === gid && p.role === role).map(p => p.raw_score)
     const all = (arr, exp) => arr.length > 0 && arr.every(s => near(s, exp, 0.1))
-    log('1985', parts.filter(p => [gidA, gidB, rejectGid].includes(p.group_id))
-      .map(p => `${p.id}:${p.group_id === gidA ? 'A' : p.group_id === gidB ? 'B' : 'C'}/${p.role}=${p.raw_score}`).join('  '))
+    const tag = gid => gid === gidA ? 'A' : gid === gidB ? 'B' : gid === rejectGid ? 'C' : 'D'
+    log('1985', parts.filter(p => [gidA, gidB, rejectGid, failRatifyGid].includes(p.group_id))
+      .map(p => `${p.id}:${tag(p.group_id)}/${p.role}=${p.raw_score}`).join('  '))
     // Group A dealt Deal B (Baxter 97.95 / Union 9.55). adjusted-1978 A = Baxter 80.4 / Union 43.3.
     assert(all(raws(gidA, 'baxter'), 178.35),
       'Additive final — group A Baxter = adjusted-1978 80.4 + 1985 deal 97.95 = 178.35 (score matches gate)')
@@ -707,10 +757,13 @@ async function main() {
     // Union no-deal still 60: group B Union = adjusted 36.2 + 60 = 96.2.
     assert(all(raws(gidB, 'union'), 96.2),
       '1985 Union no-deal = 60 — group B Union = adjusted-1978 36.2 + 60 = 96.2')
-    // Baxter no-deal is now the AVG OF DEALERS (A = 97.95), NOT the degenerate 50: group C Baxter
-    // FLIPS 50 → 0 + 97.95, proving the re-runnable normal path (distinct from the degenerate guard).
-    assert(all(raws(rejectGid, 'baxter'), 97.95),
-      '1985 Baxter no-deal = avg of dealers (97.95) — group C Baxter flips 50 → 97.95 (normal path)')
+    // Baxter no-deal is now the AVG OF DEALERS (A = 97.95), NOT the degenerate 50. Groups C and D
+    // (both 1978 no-deal base 90) FLIP 140 → 90 + 97.95 = 187.95, proving the full pipeline
+    // 1978-no-deal → 1983-adjust (none) → 1985-add stacks correctly and re-runs to the normal path.
+    for (const [gid, lbl] of [[rejectGid, 'C'], [failRatifyGid, 'D']]) {
+      assert(all(raws(gid, 'baxter'), 187.95),
+        `Additive final — group ${lbl} Baxter = 1978-no-deal 90 + 1985 avg-of-dealers 97.95 = 187.95 (flips 140→187.95)`)
+    }
   }
 
   banner(`RESULT — ${PASS} passed, ${FAIL} failed`)
