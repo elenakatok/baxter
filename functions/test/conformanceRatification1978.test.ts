@@ -2,10 +2,10 @@ import { describe, it, expect } from 'vitest'
 import {
   isRatified1978,
   baxterNoDeal1978,
-  BaxterNoDeal1978Degenerate,
   RATIFY_LOCATION_PASS,
   RATIFY_TRANSFER_PASS,
   BAXTER_1978_NO_DEAL_BONUS,
+  BAXTER_1978_NO_DEAL_DEGENERATE,
 } from '../src/ratification1978'
 
 /**
@@ -58,9 +58,8 @@ describe('Baxter 1978 no-deal scoring (FROZEN — min ratified + 5, degenerate t
     expect(baxterNoDeal1978([85, 85])).toBe(90)
     expect(baxterNoDeal1978([85, 72, 90])).toBe(77)   // min 72 + 5
   })
-  it('DEGENERATE — zero ratified deals THROWS (no invented number, no NaN)', () => {
-    expect(() => baxterNoDeal1978([])).toThrow(BaxterNoDeal1978Degenerate)
-    // The thrown message flags it as an open question rather than silently producing a value.
-    expect(() => baxterNoDeal1978([])).toThrow(/zero Baxters reached a ratified deal/i)
+  it('DEGENERATE — zero ratified deals → flat reservation 50 (Elena-decided; mirrors 1985)', () => {
+    expect(baxterNoDeal1978([])).toBe(50)
+    expect(BAXTER_1978_NO_DEAL_DEGENERATE).toBe(50)
   })
 })

@@ -356,11 +356,20 @@ async function drive1978Negotiation(students) {
   await pollGroupsFull(g => g.find(x => x.id === rejectGid)?.status === 'completed', 30_000)
 
   // ── DEGENERATE probe (Slice 5): score NOW — C is a no-deal Baxter but ZERO groups have a
-  // ratified deal yet → "min ratified + 5" is undefined → scoreAndRecord MUST error (not NaN). ──
-  let degenThrew = false
-  try { await inst('scoreAndRecord') } catch { degenThrew = true }
-  assert(degenThrew,
-    '1978 DEGENERATE guard — scoreAndRecord ERRORS when a Baxter no-deal exists but 0 ratified deals (no silent NaN; Elena fallback TBD)')
+  // ratified deal yet → "min ratified + 5" has no base → Baxter no-deal = 50 (flat reservation,
+  // Elena-decided; mirrors the 1985 zero-dealer guard). Union stays 0. (Re-runnable: once A/B
+  // ratify below, C flips 50 → 90.) ──
+  await inst('scoreAndRecord')
+  await sleep(1500)
+  {
+    const parts = await readParticipants()
+    const cBax = parts.filter(p => p.group_id === rejectGid && p.role === 'baxter').map(p => p.raw_score)
+    const cUni = parts.filter(p => p.group_id === rejectGid && p.role === 'union').map(p => p.raw_score)
+    assert(cBax.length > 0 && cBax.every(s => near(s, 50)),
+      '1978 DEGENERATE — 0 ratified deals → Baxter no-deal = 50 (flat reservation, Elena-decided)')
+    assert(cUni.length > 0 && cUni.every(s => s === 0),
+      '1978 DEGENERATE — 0 ratified deals → Union no-deal = 0')
+  }
 
   // ── RATIFIED dealers (A,B): canonical deal (Location=Deloitte, Transfer=Most) → ratifies ──
   await Promise.all(ratifiedGids.map(async gid => {

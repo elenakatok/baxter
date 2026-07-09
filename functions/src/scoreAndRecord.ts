@@ -18,7 +18,7 @@ import {
 import { baxterGameDef } from './gameDefinition'
 import { wage78FromOutcome, wage83FromOutcome, classAvg1983, adjustmentPct, type BaxterRole } from './transform1983'
 import { score1985, baxterNoDeal1985, UNION_1985_NO_DEAL } from './score1985'
-import { isRatified1978, baxterNoDeal1978, BaxterNoDeal1978Degenerate } from './ratification1978'
+import { isRatified1978, baxterNoDeal1978 } from './ratification1978'
 
 // Same per-game secret finalize uses, so the CLI provisions it for this function too.
 const classroomCallbackSecret = defineSecret('CLASSROOM_CALLBACK_SECRET')
@@ -198,19 +198,10 @@ export const scoreAndRecord = onCall({ cors: def.corsOrigins, secrets: [classroo
       const ratified = typeof gid === 'string' && completedGroups.has(gid) && isRatified1978(completedGroups.get(gid)!.outcome)
       return d['role'] === 'baxter' && !ratified
     })
-    // Degenerate: a Baxter no-deal is needed but NOBODY ratified → "min + 5" is undefined. Do NOT
-    // invent a number — surface it as a clear failed-precondition (an OPEN QUESTION for Elena: the
-    // 1985 degenerate resolved to a flat reservation value; 1978 has none) rather than writing NaN.
-    // Only computed when actually needed.
-    let baxterNoDeal1978Value: number | null = null
-    if (hasBaxterNoDeal) {
-      try {
-        baxterNoDeal1978Value = baxterNoDeal1978(ratifiedBaxterScores)
-      } catch (e) {
-        if (e instanceof BaxterNoDeal1978Degenerate) throw new HttpsError('failed-precondition', e.message)
-        throw e
-      }
-    }
+    // Baxter 1978 no-deal value (min ratified + 5), or the flat reservation 50 when nobody ratified
+    // (degenerate pool — Elena-decided, mirrors the 1985 zero-dealer guard). Only computed when a
+    // Baxter actually needs it.
+    const baxterNoDeal1978Value = hasBaxterNoDeal ? baxterNoDeal1978(ratifiedBaxterScores) : null
 
     // 1978 base scorer: a RATIFIED deal keeps its summed option score; a no-deal / failed-
     // ratification group scores as no-deal (Baxter min+5, Union 0). Replaces the plain option-sum

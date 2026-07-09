@@ -15,9 +15,9 @@
  * 1978 NO-DEAL scoring (spec §3, both triggers — reject AND failed ratification — score identically):
  *   • Baxter = (minimum 1978 score among Baxters who reached AND ratified a deal) + 5. Cross-group.
  *   • Union  = 0 (flat).
- *   • DEGENERATE (zero ratified Baxter deals): "min + 5" is undefined. The spec states NO fallback.
- *     We do NOT invent one — baxterNoDeal1978 THROWS so the caller surfaces it (open question for
- *     Elena; mirrors the 1985 flat-reservation resolution, which 1978 lacks). See scoreAndRecord.
+ *   • DEGENERATE (zero ratified Baxter deals): "min + 5" has no base → Baxter no-deal = 50, a flat
+ *     reservation value (Elena-decided, for completeness — this case does not occur in practice;
+ *     it mirrors the 1985 zero-dealer guard of 50). Not a throw, not an open question.
  */
 
 /** 1978 outcome field keys + the passing values for the two ratification tests. */
@@ -28,6 +28,8 @@ export const RATIFY_TRANSFER_PASS: ReadonlySet<string> = new Set(['all', 'most']
 
 /** +5 offset applied to the minimum ratified Baxter score for the 1978 Baxter no-deal. */
 export const BAXTER_1978_NO_DEAL_BONUS = 5
+/** Baxter 1978 no-deal when ZERO Baxters reached a ratified deal (flat reservation, Elena-decided). */
+export const BAXTER_1978_NO_DEAL_DEGENERATE = 50
 
 /**
  * Deterministic ratification (HARD RULE): Location = Deloitte AND Transfer ≥ Most.
@@ -39,23 +41,13 @@ export function isRatified1978(outcome: Record<string, unknown> | null | undefin
     && RATIFY_TRANSFER_PASS.has(outcome[RATIFY_TRANSFER_KEY] as string)
 }
 
-/** Thrown when the 1978 Baxter no-deal is needed but NO Baxter reached a ratified deal. */
-export class BaxterNoDeal1978Degenerate extends Error {
-  constructor() {
-    // TODO(Elena): the spec defines no fallback for "min ratified Baxter + 5" when zero Baxters
-    // ratified a deal. Do NOT invent a number here — this is an open design question (the 1985
-    // degenerate case resolved to a flat reservation value; 1978 has none). Surfaced, not silenced.
-    super('1978 Baxter no-deal is undefined: zero Baxters reached a ratified deal (min+5 has no base). Elena must define a fallback.')
-    this.name = 'BaxterNoDeal1978Degenerate'
-  }
-}
-
 /**
- * Baxter 1978 no-deal score = (minimum ratified Baxter deal score) + 5.
+ * Baxter 1978 no-deal score = (minimum ratified Baxter deal score) + 5; or the flat reservation
+ * value of 50 when NO Baxter reached a ratified deal (degenerate pool — Elena-decided, mirrors the
+ * 1985 zero-dealer guard; does not occur in practice).
  * @param ratifiedBaxterScores summed 1978 scores of every Baxter that reached a RATIFIED deal.
- * THROWS BaxterNoDeal1978Degenerate on an empty pool (no invented number — flag for Elena).
  */
 export function baxterNoDeal1978(ratifiedBaxterScores: number[]): number {
-  if (ratifiedBaxterScores.length === 0) throw new BaxterNoDeal1978Degenerate()
+  if (ratifiedBaxterScores.length === 0) return BAXTER_1978_NO_DEAL_DEGENERATE
   return Math.min(...ratifiedBaxterScores) + BAXTER_1978_NO_DEAL_BONUS
 }
