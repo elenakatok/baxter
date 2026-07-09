@@ -602,6 +602,7 @@ export default function Play() {
           gameInstanceId={gameInstanceId}
           isLead={phase.isLead}
           args={{}}
+          roundId={BAXTER_ROUNDS[currentRound]}
           onComplete={() => setPhase({ name: 'results', groupId: phase.groupId })}
         />
       )}

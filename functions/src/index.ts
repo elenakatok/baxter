@@ -67,6 +67,7 @@ export { getReportData } from './getReportData'
 export { updateGroupContract } from './updateGroupContract'
 export { updateScheme1978 } from './updateScheme1978'
 export { scoreAndRecord } from './scoreAndRecord'
+export { resolveArbitration } from './arbitrationCallable'
 
 // ── Non-game onRequest endpoints (kept as-is; not converted) ──────────────────
 

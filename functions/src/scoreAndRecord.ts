@@ -2,17 +2,21 @@ import { onCall, HttpsError } from 'firebase-functions/v2/https'
 import { defineSecret } from 'firebase-functions/params'
 import * as admin from 'firebase-admin'
 import { FieldValue } from 'firebase-admin/firestore'
-import { computeZScoresByRole, isValidRole, type ScoringRecord, type Outcome } from '@mygames/game-engine'
+import { computeZScoresByRole, zScoresSampleSD, isValidRole, type ScoringRecord, type Outcome } from '@mygames/game-engine'
 import {
   extractInstructorGameId,
   buildScoringRecord,
   dispatchResults,
   toGameResult,
+  getRoundOutcome,
+  resolveRoundSlot,
+  clampRoundIndex,
   type CompletedGroup,
   type GameResult,
   type PushSummary,
 } from '@mygames/game-server'
 import { baxterGameDef } from './gameDefinition'
+import { wage78FromOutcome, wage83FromOutcome, classAvg1983, adjustmentPct, type BaxterRole } from './transform1983'
 
 // Same per-game secret finalize uses, so the CLI provisions it for this function too.
 const classroomCallbackSecret = defineSecret('CLASSROOM_CALLBACK_SECRET')
@@ -80,7 +84,12 @@ export const scoreAndRecord = onCall({ cors: def.corsOrigins, secrets: [classroo
     // ── Full recompute from CURRENT state — no guard, no precondition ──────────
     // Build group_id → {outcome, agreement_reached} for EVERY group (resolved or
     // not). An unresolved group has outcome null → its members score as walk-away.
-    const groupsSnap = await instanceRef.collection('groups').get()
+    const [groupsSnap, participantsSnap, configSnap, instanceSnap] = await Promise.all([
+      instanceRef.collection('groups').get(),
+      instanceRef.collection('participants').get(),
+      instanceRef.collection('config').doc('main').get(),
+      instanceRef.get(),
+    ])
     const completedGroups = new Map<string, CompletedGroup>()
     for (const gdoc of groupsSnap.docs) {
       const d = gdoc.data()
@@ -89,12 +98,40 @@ export const scoreAndRecord = onCall({ cors: def.corsOrigins, secrets: [classroo
         agreement_reached: Boolean(d['agreement_reached']),
       })
     }
-
-    const [participantsSnap, configSnap] = await Promise.all([
-      instanceRef.collection('participants').get(),
-      instanceRef.collection('config').doc('main').get(),
-    ])
     const configData = (configSnap.data() ?? {}) as Record<string, unknown>
+
+    // ── 1983 score-transform pre-pass (GAME-SPECIFIC, cross-group, NOT gate-frozen) ────
+    // 1983 produces no independent score — it ADJUSTS the 1978 score (spec §4). The class-
+    // average 1983 wage is computed HERE, in the re-runnable scorer, so a late-arriving
+    // arbitration wage never leaves a stale average behind (Elena-locked). Round 1 flat
+    // `outcome` still holds the 1978 deal (Option-1 derive), so w78 reads from it; w83 reads
+    // the round-2 keyed slot. The transform applies only once the class has advanced to 1983+.
+    const IDX_1983 = (def.rounds ?? []).indexOf('1983')
+    const slot1983 = resolveRoundSlot(def.rounds, IDX_1983 < 0 ? 0 : IDX_1983)
+    const groupWages = new Map<string, { w78: number | null; w83: number | null }>()
+    for (const gdoc of groupsSnap.docs) {
+      const d = gdoc.data()
+      const w83 = IDX_1983 >= 0 ? wage83FromOutcome(getRoundOutcome(d, slot1983)) : null
+      groupWages.set(gdoc.id, { w78: wage78FromOutcome(d['outcome'] as Record<string, unknown> | null), w83 })
+    }
+    const w83Avg = classAvg1983([...groupWages.values()].map(g => g.w83))
+    const currentIdx = clampRoundIndex((def.rounds ?? []).length, instanceSnap.data()?.['current_round'])
+    const transformActive = IDX_1983 >= 0 && currentIdx >= IDX_1983 && w83Avg !== null
+
+    // Per-participant signed adjustment (percentage-points), keyed by pid. Empty when the
+    // transform is inactive → the adjusted pass below is skipped and scoring is byte-identical.
+    const adjByPid = new Map<string, number>()
+    if (transformActive) {
+      for (const pdoc of participantsSnap.docs) {
+        const pd = pdoc.data()
+        const role = pd['role']
+        const gid = pd['group_id']
+        if ((role !== 'baxter' && role !== 'union') || typeof gid !== 'string') continue
+        const gw = groupWages.get(gid)
+        if (!gw || gw.w83 == null || gw.w78 == null) continue
+        adjByPid.set(pdoc.id, adjustmentPct(role as BaxterRole, gw.w83, gw.w78, w83Avg as number))
+      }
+    }
 
     // First pass: ScoringRecord[] for role-bearing participants.
     const records: ScoringRecord[] = []
@@ -105,7 +142,35 @@ export const scoreAndRecord = onCall({ cors: def.corsOrigins, secrets: [classroo
 
     // Normalize: per-role pools, sample SD, cost-sense, no_show→-2, walk-away in-pool.
     const scorer = (role: string, outcome: Outcome | null) => def.computeRawScore(role, outcome, configData)
-    const finalized = computeZScoresByRole(records, def.roles, def.scoreSense, scorer)
+    const finalizedBase = computeZScoresByRole(records, def.roles, def.scoreSense, scorer)
+
+    // Adjusted pass: raw_score = 1978 base ± 1983 adjustment, then re-z within role over the
+    // adjusted raws (both Baxter roles are 'value'; scoreSense honoured for generality). No-show/
+    // late (raw_score null) pass through untouched. Inactive transform → finalized === base.
+    let finalized = finalizedBase
+    if (adjByPid.size > 0) {
+      const adjustedRawByPid = new Map<string, number>()
+      for (const f of finalizedBase) {
+        if (f.raw_score == null) continue
+        adjustedRawByPid.set(f.participant_id, f.raw_score + (adjByPid.get(f.participant_id) ?? 0))
+      }
+      const zByPid = new Map<string, number>()
+      for (const roleKey of def.roles.roles.map(r => r.key)) {
+        const pool = finalizedBase.filter(f => f.role === roleKey && f.raw_score != null)
+        const sense = def.scoreSense[roleKey] ?? 'value'
+        const signed = pool.map(f => {
+          const a = adjustedRawByPid.get(f.participant_id) as number
+          return sense === 'cost' ? -a : a
+        })
+        const zs = zScoresSampleSD(signed)
+        pool.forEach((f, i) => zByPid.set(f.participant_id, zs[i]))
+      }
+      finalized = finalizedBase.map(f => f.raw_score == null ? f : {
+        ...f,
+        raw_score: adjustedRawByPid.get(f.participant_id) ?? f.raw_score,
+        normalized_score: zByPid.get(f.participant_id) ?? f.normalized_score,
+      })
+    }
 
     const recordMap = def.computeScoreBreakdown
       ? new Map(records.map(r => [r.participant_id, r]))

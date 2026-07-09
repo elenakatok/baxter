@@ -24,6 +24,14 @@ export const baxterSchema: OutcomeSchema = [
   { key: 'notes',           type: 'text' },  // optional free-text; blank = '', excluded from scoring
 ]
 
+// ── 1983 outcome schema — WAGE ONLY (spec §4) ──────────────────────────────────
+// The 1983 round negotiates a single continuous 2-decimal hourly wage, NOT the six-issue
+// 1978 contract. Wired via roundOutcomeSchemas below so the round-aware submit flow
+// validates the 1983 lead outcome ({ wage83 }) against this instead of baxterSchema.
+export const baxter1983Schema: OutcomeSchema = [
+  { key: 'wage83', type: 'decimal', min: 0, max: 100, step: 0.01 },
+]
+
 // ── Score sense ───────────────────────────────────────────────────────────────
 
 /** Both roles are value-sense (higher score = better). */
@@ -85,6 +93,8 @@ export const baxterGameDef: GameDefinition = {
   // are advanceable phases with no content/scoring yet (later slices).
   rounds: ['1978', '1983', '1985'],
   outcomeSchema: baxterSchema,
+  // 1983 negotiates a wage only; other rounds fall back to the six-issue baxterSchema.
+  roundOutcomeSchemas: { '1983': baxter1983Schema },
   computeRawScore,
   computeScoreBreakdown,
   reservations: { baxter: 0, union: 0 },  // unused by the 1978 sum scorer (no surplus/reservation model)

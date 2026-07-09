@@ -23,6 +23,22 @@ export const baxterSchema: OutcomeSchema = [
   { key: 'notes',           type: 'text' },  // optional free-text; blank = '', excluded from scoring
 ]
 
+// ── 1983 contract — WAGE ONLY (a single continuous 2-decimal hourly wage) ──────
+// Mirrors functions/src/gameDefinition.ts baxter1983Schema. Distinct from the 1978
+// six-issue contract; the 1983 round negotiates just this number.
+export const baxter1983Schema: OutcomeSchema = [
+  { key: 'wage83', type: 'decimal', min: 0, max: 100, step: 0.01 },
+]
+
+// The dollar figure each 1978 `wages` option represents (mirrors OPTION_LABELS.wages).
+// Used to display a group's 1978 wage in the arbitration queue and (server-side) as the
+// Union-branch arbitration wage.
+export const WAGE_DOLLARS: Readonly<Record<string, number>> = {
+  above_top3:    12.69,
+  current:       10.69,
+  increase_top3: 11.69,
+}
+
 export const FIELD_LABELS: Readonly<Record<string, string>> = {
   wages:           'Wages & Benefits',
   plant_operation: 'Plant Operation',
@@ -31,6 +47,7 @@ export const FIELD_LABELS: Readonly<Record<string, string>> = {
   location:        'Location of New Plant',
   transfer:        'Transfer of Local 190',
   notes:           'Notes',
+  wage83:          'New hourly wage ($)',
 }
 
 // Human-readable option labels: field key → { stored value → display label }.
@@ -78,5 +95,11 @@ export function formatField(field: OutcomeField, value: unknown): string {
   if (field.type === 'enum')    return labelForOption(field.key, value)
   if (field.type === 'boolean') return (value as boolean) ? 'Yes' : 'No'
   if (field.type === 'integer') return (value as number).toLocaleString('en-US')
+  if (field.type === 'decimal') {
+    const n = value as number
+    return typeof n === 'number' && Number.isFinite(n)
+      ? `$${n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+      : String(value)
+  }
   return String(value)
 }

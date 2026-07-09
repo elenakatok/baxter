@@ -123,6 +123,16 @@ export const beginRound2 = () =>
 export const getRoster = () =>
   callFn<{ ok: boolean; participants: RosterParticipant[]; groups: RosterGroup[] }>('getRoster', {})
 
+// ── 1983 arbitration (Slice 3) ─────────────────────────────────────────────────
+/**
+ * Resolve one flagged 1983 group's arbitration. The RNG fires server-side at this call
+ * (p=2/3 Baxter → $8.67; 1/3 Union → the group's 1978 wage) and writes the wage to the 1983
+ * slot. `seed` is emulator-only (deterministic sims); production ignores it and seeds from crypto.
+ */
+export type ArbitrationResult = { ok: boolean; group_id: string; side: 'baxter' | 'union'; wage: number; w78: number }
+export const resolveArbitration = (groupId: string, seed?: number) =>
+  callFn<ArbitrationResult>('resolveArbitration', seed === undefined ? { group_id: groupId } : { group_id: groupId, seed })
+
 export const triggerMatching = () =>
   callFn<{ ok: boolean; groups: unknown[]; alreadyMatched?: boolean }>('triggerMatching', {})
 

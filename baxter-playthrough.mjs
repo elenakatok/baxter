@@ -48,7 +48,10 @@ const SLOWMO        = process.env.SLOWMO ? Number(process.env.SLOWMO) : 0
 
 // A fresh instance id per run so re-runs never collide. (Date.now is fine in a plain script.)
 const GID = process.env.GID ?? `pt-${Date.now()}`
-const PIDS = ['stu-1', 'stu-2', 'stu-3', 'stu-4']
+// TWO groups (Slice 3): 8 students → 4 Baxter + 4 Local 190 → two groups of 2+2. One group
+// AGREES a 1983 wage (exercises the wage-only form + submit + transform); the other NO-DEALS
+// (exercises the arbitration queue + seeded resolve). w83_avg is then a real cross-group average.
+const PIDS = ['stu-1', 'stu-2', 'stu-3', 'stu-4', 'stu-5', 'stu-6', 'stu-7', 'stu-8']
 
 const ROLE_RADIO = {
   baxter: 'Baxter Management — the Adam Baxter Company management team',
@@ -156,6 +159,44 @@ async function pollGroupsStatus(pred, maxMs = 30_000) {
   return readGroupStatus()
 }
 
+// Full group read incl. the 1983 keyed wage + arbitration marker (nested mapValue in REST).
+async function readGroupsFull() {
+  const docs = await fsGetDocs('groups')
+  return docs.map(d => {
+    const o1983 = d.fields?.outcomes_by_round?.mapValue?.fields?.['1983']?.mapValue?.fields
+    const arb   = d.fields?.arbitration_1983?.mapValue?.fields
+    return {
+      id: d.name.split('/').pop(),
+      status: strVal(d.fields?.status),
+      wage83: o1983?.wage83 != null ? numVal(o1983.wage83) : null,
+      arbSide: arb?.side ? strVal(arb.side) : null,
+      arbWage: arb?.wage != null ? numVal(arb.wage) : null,
+    }
+  })
+}
+async function pollGroupsFull(pred, maxMs = 30_000) {
+  const start = Date.now()
+  while (Date.now() - start < maxMs) {
+    const gs = await readGroupsFull()
+    if (gs.length && pred(gs)) return gs
+    await sleep(1000)
+  }
+  return readGroupsFull()
+}
+
+/** Map browser students → their group, tagging each with is_lead/role from Firestore. */
+function groupStudents(studs, parts) {
+  const byPid = Object.fromEntries(parts.map(p => [p.id, p]))
+  const groups = {}
+  for (const s of studs) {
+    const p = byPid[s.pid]
+    if (!p?.group_id) continue
+    ;(groups[p.group_id] ??= []).push({ ...s, is_lead: p.is_lead, role: p.role })
+  }
+  return groups
+}
+const near = (a, b, tol = 0.05) => typeof a === 'number' && Math.abs(a - b) <= tol
+
 // ── Student page URL (DEV _test bypass) ─────────────────────────────────────────
 
 const studentUrl = pid => `${FE}/?_pid=${pid}&_gid=${GID}&_session=tab`
@@ -227,35 +268,34 @@ async function drive1978Negotiation(students) {
     if (!flipped) { await s.page.click('button:has-text("Start negotiation")'); await s.page.waitForSelector('h1:has-text("Go negotiate")', { timeout: 12_000 }) }
     log(s.pid, 'off-platform')
   }
-  // Everyone taps "We've finished" so the lead reaches the report form and non-leads reach confirm.
+  // Everyone taps "We've finished" so leads reach the report form and non-leads reach confirm.
   await Promise.all(students.map(s => s.page.click("button:has-text(\"We've finished\")").catch(() => {})))
 
-  // Identify the lead from Firestore.
-  const parts = await readParticipants()
-  const leadId = parts.find(p => p.is_lead)?.id ?? students[0].pid
-  const lead = students.find(s => s.pid === leadId) ?? students[0]
-  const nonLeads = students.filter(s => s !== lead)
-  log(lead.pid, `lead — filling canonical 1978 deal`)
-
-  await lead.page.waitForSelector('h1:has-text("Report outcome")', { timeout: 30_000 })
-  // Six enum <select>s in baxterSchema order; fill by option VALUE (the stored key).
+  // Per-group: the group's lead reports the SAME canonical 1978 deal; its non-leads confirm.
   const order = ['wages', 'plant_operation', 'escalator', 'incentive', 'location', 'transfer']
-  const selects = lead.page.locator('select')
-  for (let i = 0; i < order.length; i++) {
-    await selects.nth(i).selectOption(CANONICAL_1978_OUTCOME[order[i]])
-  }
-  await lead.page.click('button:has-text("Review & submit")')
-  await lead.page.waitForSelector('h1:has-text("Confirm outcome")', { timeout: 10_000 })
-  await lead.page.click('button:has-text("Yes, submit")')
-
-  // Non-leads confirm.
-  await Promise.all(nonLeads.map(async s => {
-    await s.page.waitForSelector('h1:has-text("Confirm")', { timeout: 30_000 })
-    await s.page.click('button:has-text("Confirm")')
-    log(s.pid, 'confirmed')
+  const parts = await readParticipants()
+  const groups = groupStudents(students, parts)
+  log('1978', `${Object.keys(groups).length} group(s): ${Object.keys(groups).join(', ')}`)
+  await Promise.all(Object.entries(groups).map(async ([gid, members]) => {
+    const lead = members.find(m => m.is_lead) ?? members[0]
+    const nonLeads = members.filter(m => m !== lead)
+    log(lead.pid, `lead of ${gid} — filling canonical 1978 deal`)
+    await lead.page.waitForSelector('h1:has-text("Report outcome")', { timeout: 30_000 })
+    const selects = lead.page.locator('select')
+    for (let i = 0; i < order.length; i++) {
+      await selects.nth(i).selectOption(CANONICAL_1978_OUTCOME[order[i]])
+    }
+    await lead.page.click('button:has-text("Review & submit")')
+    await lead.page.waitForSelector('h1:has-text("Confirm outcome")', { timeout: 10_000 })
+    await lead.page.click('button:has-text("Yes, submit")')
+    await Promise.all(nonLeads.map(async s => {
+      await s.page.waitForSelector('h1:has-text("Confirm")', { timeout: 30_000 })
+      await s.page.click('button:has-text("Confirm")')
+      log(s.pid, `confirmed (${gid})`)
+    }))
   }))
-  const gs = await pollGroupsStatus(g => g.every(x => x.status === 'completed'))
-  assert(gs.every(x => x.status === 'completed'), '1978 group reaches "completed"')
+  const gs = await pollGroupsStatus(g => g.length >= 2 && g.every(x => x.status === 'completed'))
+  assert(gs.length >= 2 && gs.every(x => x.status === 'completed'), '1978 — both groups reach "completed"')
 }
 
 // ── MAIN ──────────────────────────────────────────────────────────────────────
@@ -359,10 +399,93 @@ async function main() {
     assert(!stillThere, 'B — "Begin 1983" does NOT reappear once the round has begun')
   }
 
-  // TODO(Slice 3): once the wage-only 1983 report form exists, drive the 1983 lead through it
-  // and assert the form shows ONLY the wage field. The 1983 form is not built yet, so we stop at
-  // the 1983 "Go negotiate" screen (the resume is already proven above) rather than assert on it.
-  console.log('\n  TODO(Slice 3): assert wage-only 1983 report form — not built yet, not run.')
+  // ── Slice 3: 1983 wage-only form + arbitration + score-transform ──────────────
+  banner('1983 negotiation — group A agrees a wage, group B no-deals')
+  // Everyone taps "We've finished" to reach the 1983 report / confirm screens.
+  await Promise.all(students.map(s => s.page.click("button:has-text(\"We've finished\")").catch(() => {})))
+
+  const parts83 = await readParticipants()
+  const groups83 = groupStudents(students, parts83)
+  const gids = Object.keys(groups83).sort()
+  const [gidA, gidB] = gids
+  log('1983', `group A=${gidA} (agree $9.50) · group B=${gidB} (no deal → arbitration)`)
+
+  // Group A — wage-only form: assert ONLY the wage field renders, then submit $9.50 (continuous).
+  const gA = groups83[gidA]; const leadA = gA.find(m => m.is_lead) ?? gA[0]; const nonA = gA.filter(m => m !== leadA)
+  await leadA.page.waitForSelector('h1:has-text("Report outcome")', { timeout: 30_000 })
+  {
+    const selectCount = await leadA.page.locator('select').count()
+    const numInputs   = await leadA.page.locator('input[type="number"]').count()
+    assert(selectCount === 0 && numInputs === 1,
+      '1983 wage-only form RENDERS (one numeric wage field, none of the six 1978 selects)')
+  }
+  await leadA.page.locator('input[type="number"]').fill('9.50')
+  await leadA.page.click('button:has-text("Review & submit")')
+  await leadA.page.waitForSelector('h1:has-text("Confirm outcome")', { timeout: 10_000 })
+  await leadA.page.click('button:has-text("Yes, submit")')
+  await Promise.all(nonA.map(async s => {
+    await s.page.waitForSelector('h1:has-text("Confirm")', { timeout: 30_000 })
+    await s.page.click('button:has-text("Confirm")')
+  }))
+  log('1983', `group A lead ${leadA.pid} submitted $9.50; non-leads confirmed`)
+
+  // Group B — no deal (forces the arbitration path).
+  const gB = groups83[gidB]; const leadB = gB.find(m => m.is_lead) ?? gB[0]; const nonB = gB.filter(m => m !== leadB)
+  await leadB.page.waitForSelector('h1:has-text("Report outcome")', { timeout: 30_000 })
+  await leadB.page.click('button:has-text("No deal")')
+  await leadB.page.waitForSelector('h1:has-text("Confirm no deal")', { timeout: 10_000 })
+  await leadB.page.click('button:has-text("Yes, no deal")')
+  await Promise.all(nonB.map(async s => {
+    await s.page.waitForSelector('h1:has-text("Confirm")', { timeout: 30_000 })
+    await s.page.click('button:has-text("Confirm")')
+  }))
+  log('1983', `group B lead ${leadB.pid} reported NO DEAL; non-leads confirmed`)
+
+  const g83 = await pollGroupsFull(
+    g => g.length >= 2 && g.every(x => x.status === 'completed' || x.status === 'deadlocked'), 40_000)
+  assert(near(g83.find(x => x.id === gidA)?.wage83, 9.50),
+    '1983 wage-only form SUBMITS — group A wage83 = $9.50 stored (continuous, server-validated)')
+  assert(g83.find(x => x.id === gidB)?.wage83 == null,
+    '1983 no-deal — group B ended with NO agreed wage')
+
+  // ── Arbitration: group B auto-flagged → seeded resolve → $8.67 (Baxter branch) ──
+  banner('arbitration — group B auto-flagged → seeded resolve')
+  await dash.reload(); await sleep(2500)
+  {
+    const btnVisible = await dash.locator('button:has-text("Resolve arbitration")').isVisible().catch(() => false)
+    assert(btnVisible, 'Arbitration — group B is AUTO-FLAGGED (Resolve button shown on the dashboard queue)')
+  }
+  const arb = await inst('resolveArbitration', { group_id: gidB, seed: 1 })
+  assert(arb.side === 'baxter' && near(arb.wage, 8.67),
+    'Arbitration — seed 1 → Baxter rules → wage $8.67 (deterministic seeded RNG)')
+  const g83b = await pollGroupsFull(g => near(g.find(x => x.id === gidB)?.wage83, 8.67), 15_000)
+  assert(near(g83b.find(x => x.id === gidB)?.wage83, 8.67),
+    'Arbitration — group B 1983 slot now holds the arbitrated $8.67')
+
+  // ── Score-transform: Score & Record → adjusted-1978 (cross-group w83_avg) ───────
+  banner('score-transform — Score & Record → adjusted-1978')
+  await inst('scoreAndRecord')
+  await sleep(1500)
+  {
+    // w83_avg = ($9.50 + $8.67)/2 = $9.085. Both groups' 1978 wage = increase_top3 = $11.69, base 85/62.
+    //   Group A ($9.50):  Baxter 80.4  Union 43.3     Group B ($8.67):  Baxter 89.6  Union 36.2
+    const parts = await readParticipants()
+    const byGroup = {}
+    for (const p of parts) {
+      if (p.group_id !== gidA && p.group_id !== gidB) continue
+      ;((byGroup[p.group_id] ??= {})[p.role] ??= []).push(p.raw_score)
+    }
+    log('xform', parts.filter(p => p.group_id === gidA || p.group_id === gidB)
+      .map(p => `${p.id}:${p.group_id === gidA ? 'A' : 'B'}/${p.role}=${p.raw_score}`).join('  '))
+    const check = (gid, role, exp) => {
+      const arr = byGroup[gid]?.[role] ?? []
+      return arr.length > 0 && arr.every(s => near(s, exp))
+    }
+    assert(check(gidA, 'baxter', 80.4), 'Transform — group A Baxter adjusted-1978 = 80.4')
+    assert(check(gidA, 'union',  43.3), 'Transform — group A Union adjusted-1978 = 43.3')
+    assert(check(gidB, 'baxter', 89.6), 'Transform — group B Baxter adjusted-1978 = 89.6')
+    assert(check(gidB, 'union',  36.2), 'Transform — group B Union adjusted-1978 = 36.2')
+  }
 
   banner(`RESULT — ${PASS} passed, ${FAIL} failed`)
   // Any non-throwing assertion failures still get a full page/heading/screenshot dump.

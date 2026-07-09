@@ -4,14 +4,48 @@ import { db } from '../firebase'
 import { submitLeadOutcome, submitConfirmation, type CallArgs } from '../api'
 import { labelFor } from '@mygames/game-engine/roles'
 import {
+  SchemaField as UiSchemaField,
+  parseForm as uiParseForm,
+  defaultFormValues as uiDefaultFormValues,
+  OutcomeCard as UiOutcomeCard,
+  type OutcomeFormLabels,
+  type OutcomeFormSchema,
+  type OutcomeFormValues,
+  type ParseOk,
+  type ParseErr,
+} from '@mygames/game-ui'
+import {
   baxterConfig,
   baxterSchema,
+  baxter1983Schema,
   FIELD_LABELS,
   formatField,
   labelForOption,
-  type OutcomeField as FieldDef,
+  type OutcomeField,
   type OutcomeSchema,
 } from '../gameConfig'
+
+// ── Baxter label hooks for the shared outcome-form renderer ────────────────────
+const baxterLabels: OutcomeFormLabels = {
+  fieldLabel:  key => FIELD_LABELS[key] ?? key,
+  optionLabel: (key, value) => labelForOption(key, value),
+  formatValue: (field, value) => formatField(field as OutcomeField, value),
+}
+
+// Baxter-bound re-exports of the shared renderer (labels baked in) so this module's
+// existing consumers (this page + the instructor dashboard) keep their import site.
+export type FormValues = OutcomeFormValues
+export function SchemaField(props: {
+  field: OutcomeSchema[number]
+  value: string | boolean
+  onChange: (v: string | boolean) => void
+  disabled: boolean
+}) {
+  return <UiSchemaField {...props} labels={baxterLabels} />
+}
+export function parseForm(values: FormValues, schema: OutcomeFormSchema = baxterSchema): ParseOk | ParseErr {
+  return uiParseForm(values, schema, baxterLabels)
+}
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -42,154 +76,13 @@ type Props = {
   isLead: boolean
   args: CallArgs
   onComplete: () => void
+  /** Current round id. 1983 negotiates a wage only; all other rounds use the six-issue form. */
+  roundId?: string
 }
 
-// ── Schema-driven form helpers ─────────────────────────────────────────────────
-
-export type FormValues = Record<string, string | boolean>
-
-function defaultFormValues(): FormValues {
-  const out: FormValues = {}
-  for (const field of baxterSchema) {
-    if (field.type === 'integer')      out[field.key] = ''
-    else if (field.type === 'enum')    out[field.key] = field.options[0]
-    else if (field.type === 'text')    out[field.key] = ''
-    else                               out[field.key] = false
-  }
-  return out
-}
-
-type ParseOk  = { ok: true;  outcome: OutcomeFields }
-type ParseErr = { ok: false; error: string }
-
-export function parseForm(values: FormValues, schema: OutcomeSchema = baxterSchema): ParseOk | ParseErr {
-  const outcome: OutcomeFields = {}
-  for (const field of schema) {
-    if (field.type === 'integer') {
-      const raw = values[field.key] as string
-      const n   = Number(raw)
-      const lbl = FIELD_LABELS[field.key] ?? field.key
-      if (raw === '' || isNaN(n) || !Number.isInteger(n)) {
-        return { ok: false, error: `${lbl} is required.` }
-      }
-      if ((field.min !== undefined && n < field.min) || (field.max !== undefined && n > field.max)) {
-        return {
-          ok: false,
-          error: `${lbl} must be between ${(field.min ?? 0).toLocaleString()} and ${(field.max ?? 0).toLocaleString()}.`,
-        }
-      }
-      outcome[field.key] = n
-    } else if (field.type === 'enum') {
-      outcome[field.key] = values[field.key]
-    } else if (field.type === 'text') {
-      // Optional free-text — blank is valid, stored as '' (never undefined), excluded from scoring.
-      outcome[field.key] = (values[field.key] as string) ?? ''
-    } else {
-      outcome[field.key] = values[field.key]
-    }
-  }
-  return { ok: true, outcome }
-}
-
-// ── Sub-component: renders one schema field as an input ────────────────────────
-
-export function SchemaField({
-  field,
-  value,
-  onChange,
-  disabled,
-}: {
-  field: FieldDef
-  value: string | boolean
-  onChange: (v: string | boolean) => void
-  disabled: boolean
-}) {
-  const lbl = FIELD_LABELS[field.key] ?? field.key
-
-  if (field.type === 'integer') {
-    return (
-      <div style={fieldRowStyle}>
-        <label style={fieldLabelStyle}>{lbl}</label>
-        <input
-          type="number"
-          min={field.min}
-          max={field.max}
-          step={1}
-          value={value as string}
-          onChange={e => onChange(e.target.value)}
-          disabled={disabled}
-          style={inputStyle}
-        />
-        <span style={{ fontSize: '0.8rem', color: '#888' }}>
-          {(field.min ?? 0).toLocaleString()} – {(field.max ?? 0).toLocaleString()}
-        </span>
-      </div>
-    )
-  }
-
-  if (field.type === 'enum') {
-    return (
-      <div style={fieldRowStyle}>
-        <label style={fieldLabelStyle}>{lbl}</label>
-        <select
-          value={value as string}
-          onChange={e => onChange(e.target.value)}
-          disabled={disabled}
-          style={inputStyle}
-        >
-          {field.options.map(opt => (
-            <option key={opt} value={opt}>{labelForOption(field.key, opt)}</option>
-          ))}
-        </select>
-      </div>
-    )
-  }
-
-  if (field.type === 'text') {
-    return (
-      <div style={fieldRowStyle}>
-        <label style={fieldLabelStyle}>Notes</label>
-        <textarea
-          value={value as string}
-          placeholder="Optional — any terms not captured above"
-          onChange={e => onChange(e.target.value)}
-          disabled={disabled}
-          rows={3}
-          style={{ ...inputStyle, maxWidth: '100%', resize: 'vertical' as const }}
-        />
-      </div>
-    )
-  }
-
-  // boolean → checkbox
-  return (
-    <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '1rem' }}>
-      <input
-        type="checkbox"
-        id={`field-${field.key}`}
-        checked={value as boolean}
-        onChange={e => onChange(e.target.checked)}
-        disabled={disabled}
-        style={{ width: 18, height: 18 }}
-      />
-      <label htmlFor={`field-${field.key}`} style={fieldLabelStyle}>{lbl}</label>
-    </div>
-  )
-}
-
-// ── Sub-component: renders the 4-field outcome as a summary card ───────────────
-
-function OutcomeCard({ outcome }: { outcome: OutcomeFields }) {
-  return (
-    <div style={outcomeCardStyle}>
-      {baxterSchema.map(field => (
-        <div key={field.key} style={outcomeRowStyle}>
-          <span style={outcomeLabelStyle}>{FIELD_LABELS[field.key] ?? field.key}</span>
-          <span>{formatField(field, outcome[field.key])}</span>
-        </div>
-      ))}
-    </div>
-  )
+// ── Read-only outcome card (schema-aware: six-issue 1978 or wage-only 1983) ────
+function OutcomeCard({ schema, outcome }: { schema: OutcomeFormSchema; outcome: OutcomeFields }) {
+  return <UiOutcomeCard schema={schema} outcome={outcome} labels={baxterLabels} />
 }
 
 // ── Main component ─────────────────────────────────────────────────────────────
@@ -201,9 +94,12 @@ export default function OutcomeReporting({
   isLead,
   args,
   onComplete,
+  roundId,
 }: Props) {
+  // 1983 negotiates a single continuous wage; every other round uses the six-issue contract.
+  const schema: OutcomeFormSchema = roundId === '1983' ? baxter1983Schema : baxterSchema
   const [groupData,     setGroupData]     = useState<GroupData | null>(null)
-  const [formValues,    setFormValues]    = useState<FormValues>(defaultFormValues)
+  const [formValues,    setFormValues]    = useState<FormValues>(() => uiDefaultFormValues(schema))
   const [pendingDeal,   setPendingDeal]   = useState<OutcomeFields | null>(null)
   const [pendingNoDeal, setPendingNoDeal] = useState(false)
   const [submitting,    setSubmitting]    = useState(false)
@@ -228,7 +124,7 @@ export default function OutcomeReporting({
         }
         // After a reset, clear form so lead can re-enter cleanly
         if (d.lead_reported_at == null && d.status === 'reporting') {
-          setFormValues(defaultFormValues())
+          setFormValues(uiDefaultFormValues(schema))
           setFormError(null)
           setActionError(null)
           setPendingDeal(null)
@@ -256,7 +152,7 @@ export default function OutcomeReporting({
   }
 
   const handleSubmitForm = () => {
-    const result = parseForm(formValues)
+    const result = parseForm(formValues, schema)
     if (!result.ok) { setFormError(result.error); return }
     setPendingDeal(result.outcome)
     setFormError(null)
@@ -328,7 +224,7 @@ export default function OutcomeReporting({
         <p style={subtitleStyle}>You are {roleLabel}</p>
         <h1 style={h1Style}>Outcome locked</h1>
         {groupData.agreement_reached && lead_outcome != null ? (
-          <OutcomeCard outcome={lead_outcome} />
+          <OutcomeCard schema={schema} outcome={lead_outcome} />
         ) : (
           <p style={{ fontSize: '1.05rem', color: '#555' }}>No deal reached.</p>
         )}
@@ -345,7 +241,7 @@ export default function OutcomeReporting({
           <p style={subtitleStyle}>You are {roleLabel}</p>
           <h1 style={h1Style}>Confirm outcome</h1>
           <p style={{ marginBottom: '0.5rem', fontSize: '0.95rem', color: '#555' }}>You entered:</p>
-          <OutcomeCard outcome={pendingDeal} />
+          <OutcomeCard schema={schema} outcome={pendingDeal} />
           <p style={{ marginBottom: '1rem', fontSize: '0.95rem' }}>Is that correct?</p>
           {actionError && <p style={errorStyle}>{actionError}</p>}
           <div style={btnRowStyle}>
@@ -389,7 +285,7 @@ export default function OutcomeReporting({
           <p style={subtitleStyle}>You are {roleLabel}</p>
           <h1 style={h1Style}>Waiting for your group</h1>
           {lead_outcome != null
-            ? <OutcomeCard outcome={lead_outcome} />
+            ? <OutcomeCard schema={schema} outcome={lead_outcome} />
             : <p style={{ fontSize: '1.05rem', marginBottom: '1rem' }}>You reported: <strong>No deal</strong></p>}
           <p style={{ color: '#555' }}>
             {confirmedCount} of {totalCount} group member{totalCount !== 1 ? 's' : ''} confirmed.
@@ -410,7 +306,7 @@ export default function OutcomeReporting({
           </div>
         )}
         <div style={{ marginBottom: '1rem' }}>
-          {baxterSchema.map(field => (
+          {schema.map(field => (
             <SchemaField
               key={field.key}
               field={field}
@@ -464,7 +360,7 @@ export default function OutcomeReporting({
             <p style={{ marginBottom: '0.5rem', fontSize: '0.95rem', color: '#555' }}>
               Your lead reported:
             </p>
-            <OutcomeCard outcome={lead_outcome} />
+            <OutcomeCard schema={schema} outcome={lead_outcome} />
           </>
         ) : (
           <p style={{ fontSize: '1.05rem', marginBottom: '1rem' }}>
@@ -491,7 +387,7 @@ export default function OutcomeReporting({
       <p style={subtitleStyle}>You are {roleLabel}</p>
       <h1 style={h1Style}>Waiting for your group</h1>
       {lead_outcome != null
-        ? <OutcomeCard outcome={lead_outcome} />
+        ? <OutcomeCard schema={schema} outcome={lead_outcome} />
         : <p style={{ fontSize: '1.05rem', marginBottom: '1rem' }}>You confirmed: <strong>No deal</strong></p>}
       <p style={{ color: '#555' }}>
         {confirmedCount} of {totalCount} member{totalCount !== 1 ? 's' : ''} confirmed.
@@ -542,43 +438,4 @@ const ghostBtnStyle = {
   background: 'none',
   border: '1px solid #ccc',
 }
-
-const outcomeCardStyle = {
-  background: '#f0f7ff',
-  border: '1px solid #b3d4f5',
-  borderRadius: 4,
-  padding: '0.75rem 1rem',
-  marginBottom: '1rem',
-}
-
-const outcomeRowStyle = {
-  display: 'flex',
-  justifyContent: 'space-between',
-  padding: '0.2rem 0',
-}
-
-const outcomeLabelStyle = {
-  color: '#555',
-  marginRight: '1rem',
-}
-
-const fieldRowStyle = {
-  display: 'flex',
-  flexDirection: 'column' as const,
-  gap: '0.25rem',
-  marginBottom: '1rem',
-}
-
-const fieldLabelStyle = {
-  fontSize: '0.9rem',
-  fontWeight: 600,
-  color: '#333',
-}
-
-const inputStyle = {
-  fontSize: '1rem',
-  padding: '0.4rem 0.6rem',
-  border: '1px solid #ccc',
-  borderRadius: 4,
-  maxWidth: '16rem',
-}
+// (field/outcome-card styles now live in the shared @mygames/game-ui OutcomeForm.)

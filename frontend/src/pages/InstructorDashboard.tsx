@@ -1,11 +1,11 @@
 import { useState, useEffect, useCallback, type CSSProperties } from 'react'
 import { httpsCallable } from 'firebase/functions'
-import { doc, onSnapshot } from 'firebase/firestore'
+import { doc, collection, onSnapshot } from 'firebase/firestore'
 import { onAuthStateChanged } from 'firebase/auth'
 import { InstructorDashboard as SharedDashboard, type DeadlockResolutionProps, type OutcomeFields, type RoundControlsContext } from '@mygames/game-ui'
 import { auth, db, functions, rtdb } from '../firebase'
-import { baxterConfig, baxterSchema } from '../gameConfig'
-import { openRound2Attendance, beginRound2 } from '../api'
+import { baxterConfig, baxterSchema, WAGE_DOLLARS } from '../gameConfig'
+import { openRound2Attendance, beginRound2, resolveArbitration, type ArbitrationResult } from '../api'
 import { SchemaField, parseForm, type FormValues } from '../phases/OutcomeReporting'
 
 // ── Role labels from game config ──────────────────────────────────────────────
@@ -51,6 +51,109 @@ function useBaxterInstance(): BaxterInstanceState {
   }, [])
 
   return state
+}
+
+// ── Arbitration queue (Slice 3) ────────────────────────────────────────────────
+// A 1983 group that ends with NO agreed wage is auto-flagged for arbitration. The flag is
+// DERIVED (not stored): status completed/deadlocked at 1983 with no 1983 wage. The instructor
+// reads groups directly (authenticated-read rule) to get outcomes_by_round + the 1978 wage,
+// since the shared roster poll exposes neither. Resolving writes the wage and clears the flag.
+
+type ArbGroup = {
+  id: string
+  status: string
+  wage83: number | null
+  w78: number | null
+  arbitration?: { side: 'baxter' | 'union'; wage: number }
+}
+
+function useBaxterGroups(): ArbGroup[] {
+  const [groups, setGroups] = useState<ArbGroup[]>([])
+  useEffect(() => {
+    let unsub: (() => void) | null = null
+    const unsubAuth = onAuthStateChanged(auth, (user) => {
+      if (unsub) { unsub(); unsub = null }
+      if (!user) { setGroups([]); return }
+      const gameInstanceId = user.uid.replace(/^instructor_/, '')
+      unsub = onSnapshot(
+        collection(db, 'game_instances', gameInstanceId, 'groups'),
+        (snap) => {
+          setGroups(snap.docs.map((g) => {
+            const d = g.data() as Record<string, unknown>
+            const o1983 = (d['outcomes_by_round'] as Record<string, unknown> | undefined)?.['1983'] as Record<string, unknown> | null | undefined
+            const w83 = o1983?.['wage83']
+            const wagesOpt = (d['outcome'] as Record<string, unknown> | null)?.['wages']
+            const arb = d['arbitration_1983'] as { side: 'baxter' | 'union'; wage: number } | undefined
+            return {
+              id: g.id,
+              status: (d['status'] as string) ?? 'unknown',
+              wage83: typeof w83 === 'number' ? w83 : null,
+              w78: typeof wagesOpt === 'string' ? (WAGE_DOLLARS[wagesOpt] ?? null) : null,
+              arbitration: arb,
+            }
+          }))
+        },
+        () => {},
+      )
+    })
+    return () => { unsubAuth(); if (unsub) unsub() }
+  }, [])
+  return groups
+}
+
+/** Per-group "Resolve arbitration" button (plain — the cosmetic wheel is a later slice). */
+function BaxterArbitrationQueue() {
+  const groups = useBaxterGroups()
+  const [busy, setBusy]     = useState<string | null>(null)
+  const [errById, setErr]   = useState<Record<string, string>>({})
+  const [doneById, setDone] = useState<Record<string, ArbitrationResult>>({})
+
+  // Flagged = finished 1983 (completed/deadlocked) with no agreed wage. A group that has a
+  // 1983 wage (agreed OR just arbitrated) drops out of the queue.
+  const flagged = groups.filter(g => g.wage83 == null && (g.status === 'completed' || g.status === 'deadlocked'))
+
+  const handleResolve = (groupId: string) => {
+    if (busy) return
+    setBusy(groupId)
+    setErr(prev => { const n = { ...prev }; delete n[groupId]; return n })
+    resolveArbitration(groupId)
+      .then(res => setDone(prev => ({ ...prev, [groupId]: res })))
+      .catch(e => setErr(prev => ({ ...prev, [groupId]: e instanceof Error ? e.message : 'Arbitration failed.' })))
+      .finally(() => setBusy(null))
+  }
+
+  const recentlyResolved = groups.filter(g => g.arbitration != null && g.wage83 != null)
+  if (flagged.length === 0 && recentlyResolved.length === 0) return null
+
+  return (
+    <div style={arbBoxStyle}>
+      <strong style={{ fontSize: '0.9rem' }}>Arbitration queue</strong>
+      {flagged.length === 0 && <span style={hintStyle}>No groups awaiting arbitration.</span>}
+      {flagged.map(g => (
+        <div key={g.id} style={arbRowStyle}>
+          <span style={{ fontFamily: 'monospace' }}>{g.id}</span>
+          <span style={hintStyle}>1978 wage {g.w78 != null ? `$${g.w78.toFixed(2)}` : '—'}</span>
+          <button onClick={() => handleResolve(g.id)} disabled={busy != null} style={{ padding: '0.3rem 0.8rem' }}>
+            {busy === g.id ? 'Resolving…' : 'Resolve arbitration'}
+          </button>
+          {doneById[g.id] && (
+            <span style={{ color: '#1a7f37', fontSize: '0.85rem' }}>
+              {doneById[g.id].side === 'baxter' ? 'Baxter rules' : 'Union rules'} → ${doneById[g.id].wage.toFixed(2)}
+            </span>
+          )}
+          {errById[g.id] && <span style={errStyle}>{errById[g.id]}</span>}
+        </div>
+      ))}
+      {recentlyResolved.map(g => (
+        <div key={g.id} style={arbRowStyle}>
+          <span style={{ fontFamily: 'monospace' }}>{g.id}</span>
+          <span style={{ color: '#57606a', fontSize: '0.85rem' }}>
+            resolved: {g.arbitration!.side === 'baxter' ? 'Baxter rules' : 'Union rules'} → ${g.arbitration!.wage.toFixed(2)}
+          </span>
+        </div>
+      ))}
+    </div>
+  )
 }
 
 // ── Deadlock resolution control (schema-driven — the 1978 six-issue contract) ──
@@ -128,6 +231,11 @@ async function submitInstructorOutcome(groupId: string, outcome: OutcomeFields):
 const rowStyle: CSSProperties = { display: 'flex', alignItems: 'center', gap: '0.75rem', flexWrap: 'wrap' }
 const errStyle: CSSProperties = { color: '#c00', fontSize: '0.85rem' }
 const hintStyle: CSSProperties = { fontSize: '0.85rem', color: '#57606a' }
+const arbBoxStyle: CSSProperties = {
+  display: 'flex', flexDirection: 'column', gap: '0.4rem', marginTop: '0.5rem',
+  padding: '0.6rem 0.8rem', border: '1px solid #e5c07b', background: '#fdf6e3', borderRadius: 6,
+}
+const arbRowStyle: CSSProperties = { display: 'flex', alignItems: 'center', gap: '0.75rem', flexWrap: 'wrap' }
 
 function BaxterDay2Controls({ ctx, round2Begun }: { ctx: RoundControlsContext; round2Begun: boolean }) {
   const { rounds, currentRound, sessionReady, groups, reload } = ctx
@@ -182,19 +290,22 @@ function BaxterDay2Controls({ ctx, round2Begun }: { ctx: RoundControlsContext; r
   // let a re-click re-deadlock already-resolved groups (the "Begin 1983" loop, Bug B).
   if (roundId === '1983') {
     const notBegun = !round2Begun && groups.length > 0 && groups.every(g => g.status === 'completed')
-    if (notBegun) {
-      return (
-        <span style={rowStyle}>
-          <span style={hintStyle}>Regenerate the code, let students re-confirm, then:</span>
-          <button onClick={handleBegin} disabled={busy || !sessionReady} style={{ padding: '0.35rem 0.9rem' }}>
-            {busy ? 'Beginning…' : 'Begin 1983'}
-          </button>
-          {info && <span style={hintStyle}>{info}</span>}
-          {error && <span style={errStyle}>{error}</span>}
-        </span>
-      )
-    }
-    return null
+    return (
+      <div style={{ display: 'flex', flexDirection: 'column', gap: '0.25rem' }}>
+        {notBegun && (
+          <span style={rowStyle}>
+            <span style={hintStyle}>Regenerate the code, let students re-confirm, then:</span>
+            <button onClick={handleBegin} disabled={busy || !sessionReady} style={{ padding: '0.35rem 0.9rem' }}>
+              {busy ? 'Beginning…' : 'Begin 1983'}
+            </button>
+            {info && <span style={hintStyle}>{info}</span>}
+            {error && <span style={errStyle}>{error}</span>}
+          </span>
+        )}
+        {/* Auto-flagged arbitration queue — appears once groups finish 1983 with no agreed wage. */}
+        <BaxterArbitrationQueue />
+      </div>
+    )
   }
 
   return null
