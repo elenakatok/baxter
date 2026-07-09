@@ -494,7 +494,14 @@ async function main() {
   await inst('updateScheme1978', { scheme1978: SCHEME_1978 })
   log('seed', 'scheme1978 written (85/62 baseline)')
 
-  browser = await chromium.launch({ headless: !HEADED, slowMo: SLOWMO })
+  // Anti-backgrounding flags: with ~18 pages open, Chromium backgrounds/freezes the non-focused
+  // dashboard tab and STALLS its setTimeout-driven reveal animation. These keep every page's timers
+  // live regardless of focus (harness-only; the real single-tab instructor dashboard never freezes).
+  browser = await chromium.launch({
+    headless: !HEADED,
+    slowMo: SLOWMO,
+    args: ['--disable-background-timer-throttling', '--disable-backgrounding-occluded-windows', '--disable-renderer-backgrounding'],
+  })
 
   // 1. Setup the 16 attending students (sequential → deterministic 8 Baxter / 8 Local 190 balance).
   for (const pid of PIDS) {
@@ -761,6 +768,44 @@ async function main() {
     assert(/8\.67/.test(txt) && /arbitration/i.test(txt) && !/no deal reached/i.test(txt),
       'Arbitrated-view — group B student view FLIPS to the arbitrated $8.67 (no longer "No deal")')
   }
+
+  // ── Slice 8: arbitration REVEAL animation (cosmetic wrapper over resolveArbitration) ──
+  banner('arbitration reveal — cosmetic animation of the ALREADY-DECIDED outcome')
+  {
+    await dash.bringToFront()
+    await dash.reload(); await sleep(2500)
+    // 1) BAXTER outcome via the dashboard "▶ Play reveal" button. Reads the STORED (real) side +
+    //    wage that resolveArbitration wrote for group B above (Baxter / $8.67) — integration path.
+    const playBtn = dash.locator('button:has-text("Play reveal")').first()
+    assert(await playBtn.isVisible().catch(() => false), 'Reveal — "▶ Play reveal" button shown for the resolved group')
+    await playBtn.click()
+    assert(await dash.locator('[data-el="stage"]').isVisible().catch(() => false), 'Reveal — component MOUNTS (stage renders) on play, no error')
+    await dash.waitForSelector('[data-el="cardVerdict"]:has-text("Management Prevails")', { timeout: 12_000 })
+    const baxWage = (await dash.locator('[data-el="cardWage"]').textContent())?.trim()
+    assert(baxWage === '$8.67 / hr', `Reveal — BAXTER verdict "Management Prevails" + fixed $8.67 award [got "${baxWage}"]`)
+    assert(near(arb.wage, 8.67) && baxWage === `$${arb.wage.toFixed(2)} / hr`,
+      'Reveal — displayed wage EQUALS the wage resolveArbitration wrote (read from the group doc, not recomputed)')
+    await dash.click('button:has-text("Dismiss")')
+    await dash.waitForSelector('[data-el="stage"]', { state: 'detached', timeout: 8_000 })
+
+    // 2) UNION outcome via the emulator-only "Test union reveal" button (same ref.playVerdict the
+    //    resolve fires; the seeded run only produces one Baxter outcome). The wage is INJECTED per
+    //    group (here $9.50) and must render as a real number — NOT the {{unionWage}} placeholder.
+    const unionBtn = dash.locator('button:has-text("Test union reveal")')
+    assert(await unionBtn.isVisible().catch(() => false), 'Reveal — emulator "Test union reveal" seam present')
+    await unionBtn.click()
+    await dash.waitForSelector('[data-el="stage"]', { timeout: 8_000 })
+    await dash.waitForSelector('[data-el="cardVerdict"]:has-text("The Union Prevails")', { timeout: 12_000 })
+    const uniWage = (await dash.locator('[data-el="cardWage"]').textContent())?.trim()
+    assert(uniWage === '$9.50 / hr', `Reveal — UNION verdict "The Union Prevails" + INJECTED wage $9.50 [got "${uniWage}"]`)
+    assert(!/\{\{|unionWage/.test(uniWage ?? ''), 'Reveal — Union wage is the injected number, NOT the {{unionWage}} placeholder')
+    await dash.click('button:has-text("Dismiss")')
+    await dash.waitForSelector('[data-el="stage"]', { state: 'detached', timeout: 8_000 })
+  }
+  // Mechanics UNCHANGED: the animation is a pure wrapper — resolveArbitration still decided
+  // Baxter/$8.67 (seed 1) and wrote wage83 8.67; the reveal added no change to RNG / wage / scoring.
+  assert(arb.side === 'baxter' && near(arb.wage, 8.67) && near(g83b.find(x => x.id === gidB)?.wage83, 8.67),
+    'Reveal — resolveArbitration mechanics UNCHANGED (seed 1 → Baxter/$8.67, wage83 intact)')
 
   // ── Score-transform: Score & Record → adjusted-1978 (cross-group w83_avg) ───────
   banner('score-transform — Score & Record → adjusted-1978')

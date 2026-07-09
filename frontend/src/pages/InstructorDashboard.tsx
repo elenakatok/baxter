@@ -7,6 +7,7 @@ import { auth, db, functions, rtdb } from '../firebase'
 import { baxterConfig, baxterSchema, WAGE_DOLLARS } from '../gameConfig'
 import { openRound2Attendance, beginRound2, resolveArbitration, advanceRound, type ArbitrationResult } from '../api'
 import { SchemaField, parseForm, type FormValues } from '../phases/OutcomeReporting'
+import { ArbitrationReveal, type ArbitrationOutcome } from './ArbitrationReveal'
 
 // ── Role labels from game config ──────────────────────────────────────────────
 
@@ -101,12 +102,48 @@ function useBaxterGroups(): ArbGroup[] {
   return groups
 }
 
-/** Per-group "Resolve arbitration" button (plain — the cosmetic wheel is a later slice). */
+// A pending reveal = the PRE-DECIDED outcome (side + written wage) resolveArbitration returned.
+type RevealState = { side: ArbitrationOutcome; wage: number } | null
+
+const revealOverlayStyle: CSSProperties = {
+  position: 'fixed', inset: 0, zIndex: 9999, background: '#04070a',
+}
+const revealDismissStyle: CSSProperties = {
+  position: 'absolute', top: 16, right: 16, zIndex: 10000,
+  padding: '0.5rem 1rem', borderRadius: 8, border: '1px solid rgba(255,255,255,0.2)',
+  background: 'rgba(8,12,14,0.82)', color: '#dff1ea', cursor: 'pointer',
+  fontFamily: 'monospace', letterSpacing: '0.08em', textTransform: 'uppercase', fontSize: 12,
+}
+
+/**
+ * Full-screen (projector-friendly) reveal modal. Purely COSMETIC — it plays the outcome
+ * resolveArbitration ALREADY decided; it never chooses or recomputes anything. Dismisses cleanly
+ * back to the dashboard.
+ */
+function ArbitrationRevealModal({ side, wage, onClose }: { side: ArbitrationOutcome; wage: number; onClose: () => void }) {
+  // Prop-driven auto-play: union injects the written wage formatted to 2 dp ($9.50, not $9.5);
+  // Baxter uses the fixed $8.67 award. Never recomputed — a reveal of the real decided value.
+  return (
+    <div style={revealOverlayStyle} role="dialog" aria-label="Arbitration reveal">
+      <ArbitrationReveal outcome={side} unionWage={side === 'union' ? wage.toFixed(2) : undefined} />
+      <button onClick={onClose} style={revealDismissStyle}>Dismiss</button>
+    </div>
+  )
+}
+
+/** Per-group "Resolve arbitration" button + the cosmetic full-screen reveal (Slice: wheel). */
 function BaxterArbitrationQueue() {
   const groups = useBaxterGroups()
   const [busy, setBusy]     = useState<string | null>(null)
   const [errById, setErr]   = useState<Record<string, string>>({})
   const [doneById, setDone] = useState<Record<string, ArbitrationResult>>({})
+  const [reveal, setReveal] = useState<RevealState>(null)
+
+  // Harness/dev seam (emulator dashboard only, ?_dev_game_instance_id=…; never present in
+  // production): a click-driven button to preview the UNION reveal — the real arbitration flow only
+  // produces one seeded outcome per harness run. Click-driven (not window/evaluate) so the page has a
+  // fresh user gesture and Chromium does not background-throttle the reveal's timers.
+  const isDev = new URLSearchParams(window.location.search).has('_dev_game_instance_id')
 
   // Flagged = finished 1983 (completed/deadlocked) with no agreed wage. A group that has a
   // 1983 wage (agreed OR just arbitrated) drops out of the queue.
@@ -117,7 +154,11 @@ function BaxterArbitrationQueue() {
     setBusy(groupId)
     setErr(prev => { const n = { ...prev }; delete n[groupId]; return n })
     resolveArbitration(groupId)
-      .then(res => setDone(prev => ({ ...prev, [groupId]: res })))
+      .then(res => {
+        setDone(prev => ({ ...prev, [groupId]: res }))
+        // Cosmetic reveal of the outcome resolveArbitration just decided (side + written wage).
+        setReveal({ side: res.side, wage: res.wage })
+      })
       .catch(e => setErr(prev => ({ ...prev, [groupId]: e instanceof Error ? e.message : 'Arbitration failed.' })))
       .finally(() => setBusy(null))
   }
@@ -150,8 +191,29 @@ function BaxterArbitrationQueue() {
           <span style={{ color: '#57606a', fontSize: '0.85rem' }}>
             resolved: {g.arbitration!.side === 'baxter' ? 'Baxter rules' : 'Union rules'} → ${g.arbitration!.wage.toFixed(2)}
           </span>
+          {/* Replay the reveal for a resolved group — reads the STORED (real) side + wage. */}
+          <button
+            onClick={() => setReveal({ side: g.arbitration!.side, wage: g.arbitration!.wage })}
+            style={{ padding: '0.25rem 0.7rem' }}
+          >
+            ▶ Play reveal
+          </button>
         </div>
       ))}
+      {isDev && (
+        <button
+          onClick={() => setReveal({ side: 'union', wage: 9.5 })}
+          style={{ padding: '0.25rem 0.7rem', opacity: 0.6 }}
+        >
+          ▶ Test union reveal
+        </button>
+      )}
+      {reveal && (
+        // Stable key: the modal is a sibling of the variable-length arbitration rows above. Without
+        // a key, a groups snapshot mid-animation shifts its position and React remounts it — which
+        // clears the reveal's beat timers. The key pins it so it survives sibling re-renders.
+        <ArbitrationRevealModal key="arbitration-reveal" side={reveal.side} wage={reveal.wage} onClose={() => setReveal(null)} />
+      )}
     </div>
   )
 }
