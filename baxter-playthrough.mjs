@@ -30,6 +30,7 @@
 
 import { chromium } from 'playwright'
 import { mkdirSync } from 'node:fs'
+import { createServer } from 'node:http'
 import path from 'node:path'
 import {
   SCHEME_1978,
@@ -61,6 +62,9 @@ const PIDS = [
   'stu-1', 'stu-2', 'stu-3', 'stu-4', 'stu-5', 'stu-6', 'stu-7', 'stu-8',
   'stu-9', 'stu-10', 'stu-11', 'stu-12', 'stu-13', 'stu-14', 'stu-15', 'stu-16',
 ]
+// One extra student bootstraps (gets a role) but NEVER attends → a TRUE NO-SHOW (Slice 6): role
+// but no group → status no_show → normalized_score −2, raw_score null, EXCLUDED from the z-pool.
+const NOSHOW_PID = 'stu-17'
 
 const ROLE_RADIO = {
   baxter: 'Baxter Management — the Adam Baxter Company management team',
@@ -134,6 +138,30 @@ async function callFn(name, data) {
 // Instructor calls travel with the emulator _dev bypass (no JWT needed in the emulator).
 const inst = (name, extra = {}) => callFn(name, { _dev: { game_instance_id: GID }, ...extra })
 
+// ── Mock classroom callback (Slice 6): stand in for receiveGameResult so the harness can OBSERVE
+// the gradebook push. scoreAndRecord's dispatchResults POSTs one GameResult per participant to this
+// URL (passed via the _dev emulator override); we collect every posted body. The real prod handshake
+// (CALLBACK_SECRET_BAXTER + classroom receiveGameResult) is unchanged — we only redirect the URL. ──
+const CALLBACK_SECRET = 'harness-test-secret'
+async function startMockCallback() {
+  const received = []
+  const server = createServer((req, res) => {
+    let body = ''
+    req.on('data', c => (body += c))
+    req.on('end', () => {
+      try { received.push({ auth: req.headers.authorization, result: JSON.parse(body) }) }
+      catch { received.push({ auth: req.headers.authorization, result: body }) }
+      res.writeHead(200, { 'Content-Type': 'application/json' }); res.end('{"ok":true}')
+    })
+  })
+  await new Promise(r => server.listen(0, '127.0.0.1', r))
+  const url = `http://127.0.0.1:${server.address().port}/receiveGameResult`
+  return { url, received, close: () => new Promise(r => server.close(r)) }
+}
+/** scoreAndRecord with the mock callback wired via the _dev override → fires the gradebook push. */
+const scoreAndPush = (callbackUrl) =>
+  callFn('scoreAndRecord', { _dev: { game_instance_id: GID, callback_url: callbackUrl, callback_secret: CALLBACK_SECRET } })
+
 async function fsGetDocs(collection) {
   const res = await fetch(`${FIRESTORE}/game_instances/${GID}/${collection}?pageSize=100`, {
     headers: { Authorization: 'Bearer owner' },
@@ -147,11 +175,12 @@ const numVal = f => (f?.integerValue != null ? parseInt(f.integerValue, 10) : (f
 async function readParticipants() {
   const docs = await fsGetDocs('participants')
   return docs.map(d => ({
-    id:        d.name.split('/').pop(),
-    role:      strVal(d.fields?.role),
-    is_lead:   d.fields?.is_lead?.booleanValue ?? false,
-    raw_score: numVal(d.fields?.raw_score),
-    group_id:  strVal(d.fields?.group_id),
+    id:               d.name.split('/').pop(),
+    role:             strVal(d.fields?.role),
+    is_lead:          d.fields?.is_lead?.booleanValue ?? false,
+    raw_score:        numVal(d.fields?.raw_score),
+    normalized_score: numVal(d.fields?.normalized_score),
+    group_id:         strVal(d.fields?.group_id),
   }))
 }
 async function readGroupStatus() {
@@ -412,13 +441,19 @@ async function main() {
 
   browser = await chromium.launch({ headless: !HEADED, slowMo: SLOWMO })
 
-  // 1. Setup all 4 students (sequential → deterministic 2 Baxter / 2 Local 190 role balance).
+  // 1. Setup the 16 attending students (sequential → deterministic 8 Baxter / 8 Local 190 balance).
   for (const pid of PIDS) {
     const ctx = await browser.newContext()
     students.push(await driveSetup(await ctx.newPage(), pid))
   }
   const roles = students.map(s => s.role)
   log('setup', `roles: ${roles.join(', ')}`)
+
+  // 1b. Setup ONE extra student (Slice 6 no-show): it bootstraps a role via driveSetup but is NEVER
+  //     added to `students`, so it never attends, never matches, and stays group-less → a TRUE
+  //     no-show at scoring time (normalized −2, raw null, excluded from the z-pool).
+  const noShow = await driveSetup(await (await browser.newContext()).newPage(), NOSHOW_PID)
+  log('setup', `no-show ${noShow.pid} (${noShow.role}) bootstrapped — will NOT attend`)
 
   // 2. Instructor generates the 1978 attendance code; students confirm to the waiting room.
   const { code } = await inst('generateAttendanceCode')
@@ -774,6 +809,64 @@ async function main() {
         `Additive final — group ${lbl} Baxter = 1978-no-deal 90 + 1985 avg-of-dealers 97.95 = 187.95 (flips 140→187.95)`)
     }
   }
+
+  // ══ TERMINAL (Slice 6) — z-score ONCE within role (sample SD ÷N−1) + gradebook push ═══════
+  banner('terminal — z-score (two pools, sample SD ÷N−1) + fire the gradebook push once')
+  const cb = await startMockCallback()
+  await scoreAndPush(cb.url)   // the ONE terminal scoreAndRecord that fires the push (callback wired)
+  await sleep(2000)
+  {
+    const parts = await readParticipants()
+    const roleBearing = parts.filter(p => p.role === 'baxter' || p.role === 'union')
+
+    // (a) Two-pool z with SAMPLE SD (÷N−1), proven DISTINCT from population SD (÷N). Each role is
+    //     normalized only within its own pool of non-null final raws.
+    const zProof = (roleKey) => {
+      const pool = parts.filter(p => p.role === roleKey && p.raw_score != null)
+      const n = pool.length
+      const mean = pool.reduce((a, p) => a + p.raw_score, 0) / n
+      const ss = pool.reduce((a, p) => a + (p.raw_score - mean) ** 2, 0)
+      const sampSD = Math.sqrt(ss / (n - 1))   // ÷N−1 (Excel STDEV)
+      const popSD  = Math.sqrt(ss / n)          // ÷N
+      const probe = pool.find(p => Math.abs(p.raw_score - mean) > 0.5)
+      const zSamp = (probe.raw_score - mean) / sampSD
+      const zPop  = (probe.raw_score - mean) / popSD
+      assert(near(probe.normalized_score, zSamp, 0.001),
+        `Terminal z — ${roleKey} normalized = SAMPLE-SD z (÷N−1) within its own pool (n=${n})`)
+      assert(Math.abs(probe.normalized_score - zPop) > 0.02,
+        `Terminal z — ${roleKey} normalized is NOT population-SD z (÷N=${zPop.toFixed(4)}) — provably ÷N−1`)
+      return n
+    }
+    const nBax = zProof('baxter')
+    const nUni = zProof('union')
+
+    // (b) TRUE NO-SHOW → normalized −2, raw null.
+    const ns = parts.find(p => p.id === NOSHOW_PID)
+    assert(ns && ns.normalized_score === -2 && ns.raw_score == null,
+      'Terminal — true no-show → normalized_score = −2, raw_score = null')
+
+    // (c) No-show EXCLUDED from the pools: the two pools sum to 16 (the attending students), NOT 17.
+    assert(nBax === 8 && nUni === 8,
+      `Terminal — no-show EXCLUDED from pool (Baxter n=${nBax}, Union n=${nUni}; the no-show is in neither)`)
+
+    // (d) WALK-AWAY INCLUDED: group C (ultimatum reject → reached table, no deal) carries a real raw
+    //     and a real z (not −2/null), so it is counted in the n=8 Baxter pool above.
+    const cWalk = parts.filter(p => p.group_id === rejectGid && p.role === 'baxter')
+    assert(cWalk.length > 0 && cWalk.every(p => p.raw_score != null && p.normalized_score != null && p.normalized_score !== -2),
+      'Terminal — walk-away (group C: reached table / no deal) INCLUDED in the pool (real raw + real z)')
+
+    // (e) The push fired ONCE, at the terminal step, with the z-scored payload over the EXISTING
+    //     dispatchResults → receiveGameResult handshake (only the URL was redirected to the mock).
+    assert(cb.received.length === roleBearing.length,
+      `Terminal push — fired once: ${cb.received.length} GameResults posted (16 scored + 1 no-show = ${roleBearing.length})`)
+    assert(cb.received.length > 0 && cb.received.every(r => r.auth === `Bearer ${CALLBACK_SECRET}`),
+      'Terminal push — every POST carried the callback secret (existing handshake, URL-redirected only)')
+    const probe = roleBearing.find(p => p.role === 'baxter' && p.group_id === gidA)
+    const pushed = cb.received.map(r => r.result).find(r => r.participant_id === probe.id)
+    assert(pushed && pushed.status === 'completed' && near(pushed.normalized_score, probe.normalized_score, 1e-9),
+      'Terminal push — payload carries the REAL z-scored normalized_score (matches stored), status completed')
+  }
+  await cb.close()
 
   banner(`RESULT — ${PASS} passed, ${FAIL} failed`)
   // Any non-throwing assertion failures still get a full page/heading/screenshot dump.

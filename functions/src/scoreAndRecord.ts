@@ -2,7 +2,7 @@ import { onCall, HttpsError } from 'firebase-functions/v2/https'
 import { defineSecret } from 'firebase-functions/params'
 import * as admin from 'firebase-admin'
 import { FieldValue } from 'firebase-admin/firestore'
-import { computeZScoresByRole, zScoresSampleSD, isValidRole, type ScoringRecord, type Outcome } from '@mygames/game-engine'
+import { computeZScoresByRole, isValidRole, type ScoringRecord, type Outcome } from '@mygames/game-engine'
 import {
   extractInstructorGameId,
   buildScoringRecord,
@@ -19,6 +19,7 @@ import { baxterGameDef } from './gameDefinition'
 import { wage78FromOutcome, wage83FromOutcome, classAvg1983, adjustmentPct, type BaxterRole } from './transform1983'
 import { score1985, baxterNoDeal1985, UNION_1985_NO_DEAL } from './score1985'
 import { isRatified1978, baxterNoDeal1978 } from './ratification1978'
+import { terminalZByRole, type FinalRaw } from './terminalScore'
 
 // Same per-game secret finalize uses, so the CLI provisions it for this function too.
 const classroomCallbackSecret = defineSecret('CLASSROOM_CALLBACK_SECRET')
@@ -212,29 +213,21 @@ export const scoreAndRecord = onCall({ cors: def.corsOrigins, secrets: [classroo
     }
     const finalizedBase = computeZScoresByRole(records, def.roles, def.scoreSense, scorer)
 
-    // Final pass: raw_score = 1978 base + offset (1983 adjustment + 1985 score), then re-z within
-    // role over the final raws (both Baxter roles are 'value'; scoreSense honoured for generality).
-    // No-show/late (raw_score null) pass through untouched. Empty offset → finalized === base.
-    // NOTE: terminal z-scoring with the degenerate-pool guard + the once-only gradebook push land
-    // in Slice 6; this re-runnable scorer keeps re-z'ing on every click exactly as it did for 1983.
+    // Final / TERMINAL pass (spec §6): raw_score = 1978 base + offset (1983 adjustment + 1985
+    // score); then the terminal z-score — normalize ONCE, WITHIN role, over the final raws, using
+    // sample SD (÷ N−1). No-show/late (raw_score null) are EXCLUDED from the pool and pass through
+    // untouched (their −2 / null is set elsewhere); walk-aways carry a real raw and stay in-pool.
+    // Empty offset (pre-1983 stage) → finalized === base. This scorer is re-runnable; the
+    // instructor's final click after 1985 is the terminal computation that gets pushed.
     let finalized = finalizedBase
     if (offsetByPid.size > 0) {
-      const finalRawByPid = new Map<string, number>()
-      for (const f of finalizedBase) {
-        if (f.raw_score == null) continue
-        finalRawByPid.set(f.participant_id, f.raw_score + (offsetByPid.get(f.participant_id) ?? 0))
-      }
-      const zByPid = new Map<string, number>()
-      for (const roleKey of def.roles.roles.map(r => r.key)) {
-        const pool = finalizedBase.filter(f => f.role === roleKey && f.raw_score != null)
-        const sense = def.scoreSense[roleKey] ?? 'value'
-        const signed = pool.map(f => {
-          const a = finalRawByPid.get(f.participant_id) as number
-          return sense === 'cost' ? -a : a
-        })
-        const zs = zScoresSampleSD(signed)
-        pool.forEach((f, i) => zByPid.set(f.participant_id, zs[i]))
-      }
+      const finalRaws: FinalRaw[] = finalizedBase.map(f => ({
+        participant_id: f.participant_id,
+        role: f.role,
+        raw_score: f.raw_score == null ? null : f.raw_score + (offsetByPid.get(f.participant_id) ?? 0),
+      }))
+      const finalRawByPid = new Map(finalRaws.filter(r => r.raw_score != null).map(r => [r.participant_id, r.raw_score as number]))
+      const zByPid = terminalZByRole(finalRaws, def.roles.roles.map(r => r.key), def.scoreSense)
       finalized = finalizedBase.map(f => f.raw_score == null ? f : {
         ...f,
         raw_score: finalRawByPid.get(f.participant_id) ?? f.raw_score,
