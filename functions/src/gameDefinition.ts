@@ -32,6 +32,21 @@ export const baxter1983Schema: OutcomeSchema = [
   { key: 'wage83', type: 'decimal', min: 0, max: 100, step: 0.01 },
 ]
 
+// ── 1985 outcome schema — OWN six-issue contract (spec §5) ─────────────────────
+// 1985 is NOT the 1978 issues/weights (only the wage CONCEPT carries across). It is a
+// continuous wage + five discrete option issues with their own fixed scoring (score1985.ts).
+// Wired via roundOutcomeSchemas below so the round-aware submit flow validates the 1985 lead
+// outcome against this. Option KEYS mirror BAXTER_1985_POINTS/UNION_1985_POINTS in score1985.ts
+// and OPTION_LABELS in frontend/src/gameConfig.ts.
+export const baxter1985Schema: OutcomeSchema = [
+  { key: 'wage85',       type: 'decimal', min: 0, max: 100, step: 0.01 },
+  { key: 'incentive85',  type: 'enum', options: ['none', 'above_quota', 'above_penalties'] },
+  { key: 'work_rules85', type: 'enum', options: ['mgmt_control', 'jointly_determined'] },
+  { key: 'hiring85',     type: 'enum', options: ['layoff_100', 'layoff_50', 'no_priority'] },
+  { key: 'notices85',    type: 'enum', options: ['yes', 'no'] },
+  { key: 'seniority85',  type: 'enum', options: ['all', 'some', 'none'] },
+]
+
 // ── Score sense ───────────────────────────────────────────────────────────────
 
 /** Both roles are value-sense (higher score = better). */
@@ -93,13 +108,13 @@ export const baxterGameDef: GameDefinition = {
   // are advanceable phases with no content/scoring yet (later slices).
   rounds: ['1978', '1983', '1985'],
   outcomeSchema: baxterSchema,
-  // 1983 negotiates a wage only; other rounds fall back to the six-issue baxterSchema.
-  roundOutcomeSchemas: { '1983': baxter1983Schema },
-  // Ratification mechanic per round (Bug E). 1978 is an ULTIMATUM: the receiver gets one
-  // accept/reject; reject → terminal no-deal (routes to the 1978 no-deal handling, Slice 5).
-  // 1983 stays on the standard accept/redo loop (omitted → 'unanimous'). 1985 will REUSE this
-  // exact mechanic by adding '1985': 'ultimatum' here when its content ships (Slice 4).
-  roundOutcomeMechanics: { '1978': 'ultimatum' },
+  // 1983 negotiates a wage only; 1985 has its own six-issue contract; 1978 uses baxterSchema.
+  roundOutcomeSchemas: { '1983': baxter1983Schema, '1985': baxter1985Schema },
+  // Ratification mechanic per round (Bug E). 1978 and 1985 are ULTIMATUMS: the receiver gets one
+  // accept/reject; reject → terminal no-deal (routes to the existing no-deal handling). 1985 REUSES
+  // the exact general mechanic Bug E built — DECLARATION ONLY, no new mechanic code (Slice 4).
+  // 1983 stays on the standard accept/redo loop (omitted → 'unanimous').
+  roundOutcomeMechanics: { '1978': 'ultimatum', '1985': 'ultimatum' },
   computeRawScore,
   computeScoreBreakdown,
   reservations: { baxter: 0, union: 0 },  // unused by the 1978 sum scorer (no surplus/reservation model)

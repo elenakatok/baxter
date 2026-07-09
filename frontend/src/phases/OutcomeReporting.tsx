@@ -18,12 +18,21 @@ import {
   baxterConfig,
   baxterSchema,
   baxter1983Schema,
+  baxter1985Schema,
   FIELD_LABELS,
   formatField,
   labelForOption,
   type OutcomeField,
   type OutcomeSchema,
 } from '../gameConfig'
+
+// Per-round outcome schema. 1983 negotiates a wage only; 1985 is its own six-issue contract;
+// every other round (1978) uses the six-issue baxterSchema.
+function schemaForRound(roundId: string | undefined): OutcomeFormSchema {
+  if (roundId === '1983') return baxter1983Schema
+  if (roundId === '1985') return baxter1985Schema
+  return baxterSchema
+}
 
 // ── Baxter label hooks for the shared outcome-form renderer ────────────────────
 const baxterLabels: OutcomeFormLabels = {
@@ -99,8 +108,8 @@ export default function OutcomeReporting({
   onComplete,
   roundId,
 }: Props) {
-  // 1983 negotiates a single continuous wage; every other round uses the six-issue contract.
-  const schema: OutcomeFormSchema = roundId === '1983' ? baxter1983Schema : baxterSchema
+  // 1983 = wage only; 1985 = its own six-issue contract; every other round = the six-issue 1978.
+  const schema: OutcomeFormSchema = schemaForRound(roundId)
   const [groupData,     setGroupData]     = useState<GroupData | null>(null)
   const [formValues,    setFormValues]    = useState<FormValues>(() => uiDefaultFormValues(schema))
   const [pendingDeal,   setPendingDeal]   = useState<OutcomeFields | null>(null)

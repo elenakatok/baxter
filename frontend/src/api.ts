@@ -123,6 +123,12 @@ export const beginRound2 = () =>
 export const getRoster = () =>
   callFn<{ ok: boolean; participants: RosterParticipant[]; groups: RosterGroup[] }>('getRoster', {})
 
+// ── Generic round proceed (Slice 4: the 1983→1985 gate) ────────────────────────
+/** Advance the class one round, re-opening every group to negotiate the next round (all groups
+ *  must have resolved the current round). Used for the same-session 1983→1985 proceed gate. */
+export const advanceRound = () =>
+  callFn<{ ok: boolean; current_round: number; round_id: string }>('advanceRound', {})
+
 // ── 1983 arbitration (Slice 3) ─────────────────────────────────────────────────
 /**
  * Resolve one flagged 1983 group's arbitration. The RNG fires server-side at this call

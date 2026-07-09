@@ -5,7 +5,7 @@ import { onAuthStateChanged } from 'firebase/auth'
 import { InstructorDashboard as SharedDashboard, type DeadlockResolutionProps, type OutcomeFields, type RoundControlsContext } from '@mygames/game-ui'
 import { auth, db, functions, rtdb } from '../firebase'
 import { baxterConfig, baxterSchema, WAGE_DOLLARS } from '../gameConfig'
-import { openRound2Attendance, beginRound2, resolveArbitration, type ArbitrationResult } from '../api'
+import { openRound2Attendance, beginRound2, resolveArbitration, advanceRound, type ArbitrationResult } from '../api'
 import { SchemaField, parseForm, type FormValues } from '../phases/OutcomeReporting'
 
 // ── Role labels from game config ──────────────────────────────────────────────
@@ -153,6 +153,37 @@ function BaxterArbitrationQueue() {
         </div>
       ))}
     </div>
+  )
+}
+
+/**
+ * "Proceed to 1985" — the 1983→1985 proceed gate (Slice 4). Same-session continuation, so it
+ * calls the generic advanceRound (re-opens every group to negotiate 1985; no re-attendance). Held
+ * until EVERY 1983 group is completed AND no group is still awaiting arbitration — spec §6 requires
+ * all 1983 adjustments final before the class advances.
+ */
+function BaxterProceedTo1985({ sessionReady, allCompleted, reload }: { sessionReady: boolean; allCompleted: boolean; reload: () => void }) {
+  const groups = useBaxterGroups()
+  const [busy, setBusy]   = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const pendingArb = groups.some(g => g.wage83 == null && (g.status === 'completed' || g.status === 'deadlocked'))
+  if (!allCompleted || pendingArb) return null
+
+  const handle = () => {
+    if (!sessionReady || busy) return
+    setBusy(true); setError(null)
+    advanceRound()
+      .then(() => reload())
+      .catch(e => setError(e instanceof Error ? e.message : 'Could not proceed to 1985.'))
+      .finally(() => setBusy(false))
+  }
+  return (
+    <span style={rowStyle}>
+      <button onClick={handle} disabled={busy || !sessionReady} style={{ padding: '0.35rem 0.9rem' }}>
+        {busy ? 'Proceeding…' : 'Proceed to 1985 →'}
+      </button>
+      {error && <span style={errStyle}>{error}</span>}
+    </span>
   )
 }
 
@@ -304,6 +335,12 @@ function BaxterDay2Controls({ ctx, round2Begun }: { ctx: RoundControlsContext; r
         )}
         {/* Auto-flagged arbitration queue — appears once groups finish 1983 with no agreed wage. */}
         <BaxterArbitrationQueue />
+        {/* Proceed to 1985 once every 1983 group is completed and no arbitration is pending. */}
+        <BaxterProceedTo1985
+          sessionReady={sessionReady}
+          allCompleted={groups.length > 0 && groups.every(g => g.status === 'completed')}
+          reload={reload}
+        />
       </div>
     )
   }

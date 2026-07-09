@@ -80,15 +80,22 @@ function clampRoundIndex(stored: unknown): number {
 
 /**
  * Is this participant present for the given round (Option-1 derive)?
- * Round 1 (idx 0) uses the flat `attendance_confirmed_at` flag (unchanged); rounds 2+ use
- * the keyed `attendance_by_round[roundId]` map written by verifyAttendanceCode when the
- * instance's current_round has advanced.
+ * Round 1 (idx 0) uses the flat `attendance_confirmed_at` flag (unchanged). Rounds 2+ use the
+ * keyed `attendance_by_round[roundId]` map written by verifyAttendanceCode.
+ *
+ * Day-2 presence CARRIES FORWARD: 1983 and 1985 are the same class session, so once a student
+ * has confirmed attendance for any day-2 round on/before this one, they are present for it — the
+ * 1983→1985 proceed gate does NOT ask students to re-enter a code (unlike the day-boundary
+ * 1978→1983 gate, where idx 1 has no earlier day-2 round to inherit from and so still requires a
+ * fresh check). This lets advanceRound flow students straight from a completed 1983 into 1985.
  */
 function isPresentForRound(p: Record<string, unknown>, roundIdx: number): boolean {
   if (roundIdx <= 0) return p['attendance_confirmed_at'] != null
-  const roundId = BAXTER_ROUNDS[roundIdx]
   const map = (p['attendance_by_round'] ?? {}) as Record<string, unknown>
-  return map[roundId] != null
+  for (let i = 1; i <= roundIdx; i++) {
+    if (map[BAXTER_ROUNDS[i]] != null) return true
+  }
+  return false
 }
 
 async function routeToPhase(

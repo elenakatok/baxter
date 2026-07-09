@@ -17,6 +17,7 @@ import {
 } from '@mygames/game-server'
 import { baxterGameDef } from './gameDefinition'
 import { wage78FromOutcome, wage83FromOutcome, classAvg1983, adjustmentPct, type BaxterRole } from './transform1983'
+import { score1985, baxterNoDeal1985, UNION_1985_NO_DEAL } from './score1985'
 
 // Same per-game secret finalize uses, so the CLI provisions it for this function too.
 const classroomCallbackSecret = defineSecret('CLASSROOM_CALLBACK_SECRET')
@@ -119,7 +120,7 @@ export const scoreAndRecord = onCall({ cors: def.corsOrigins, secrets: [classroo
     const transformActive = IDX_1983 >= 0 && currentIdx >= IDX_1983 && w83Avg !== null
 
     // Per-participant signed adjustment (percentage-points), keyed by pid. Empty when the
-    // transform is inactive → the adjusted pass below is skipped and scoring is byte-identical.
+    // transform is inactive → the final pass below is skipped and scoring is byte-identical.
     const adjByPid = new Map<string, number>()
     if (transformActive) {
       for (const pdoc of participantsSnap.docs) {
@@ -133,6 +134,46 @@ export const scoreAndRecord = onCall({ cors: def.corsOrigins, secrets: [classroo
       }
     }
 
+    // ── 1985 additive pre-pass (GAME-SPECIFIC, cross-group, SCORING FROZEN §5) ──────────
+    // 1985 is its OWN six-issue contract producing an independent 0–100 score that ADDS to the
+    // adjusted-1978 (final raw = adjusted-1978 + 1985). No-deal (null round-3 outcome): Union = 60
+    // flat; Baxter = average of the dealing Baxters' 1985 scores, with a degenerate-pool guard →
+    // 50 when ZERO Baxter groups dealt (spec §5 + this slice). The Baxter no-deal average is
+    // computed HERE, in the re-runnable scorer, so a late 1985 deal never leaves a stale average.
+    const IDX_1985 = (def.rounds ?? []).indexOf('1985')
+    const slot1985 = resolveRoundSlot(def.rounds, IDX_1985 < 0 ? 0 : IDX_1985)
+    const apply1985 = IDX_1985 >= 0 && currentIdx >= IDX_1985
+    const score1985ByPid = new Map<string, number>()
+    if (apply1985) {
+      // Per-group 1985 outcome (null = no deal: never reported OR an ultimatum reject).
+      const group1985 = new Map<string, Record<string, unknown> | null>()
+      for (const gdoc of groupsSnap.docs) {
+        group1985.set(gdoc.id, (getRoundOutcome(gdoc.data(), slot1985) as Record<string, unknown> | null) ?? null)
+      }
+      // Baxter no-deal value = avg of the dealing groups' Baxter 1985 scores (degenerate → 50).
+      const dealerBaxterScores: number[] = []
+      for (const o of group1985.values()) if (o != null) dealerBaxterScores.push(score1985('baxter', o))
+      const baxterNoDeal = baxterNoDeal1985(dealerBaxterScores)
+      for (const pdoc of participantsSnap.docs) {
+        const pd = pdoc.data()
+        const role = pd['role']
+        const gid = pd['group_id']
+        if ((role !== 'baxter' && role !== 'union') || typeof gid !== 'string') continue
+        const o = group1985.get(gid) ?? null
+        const s = o != null
+          ? score1985(role as BaxterRole, o)
+          : (role === 'union' ? UNION_1985_NO_DEAL : baxterNoDeal)
+        score1985ByPid.set(pdoc.id, s)
+      }
+    }
+
+    // Combined per-participant offset onto the 1978 base: 1983 adjustment (percentage-points) +
+    // 1985 score. Empty → the final pass is skipped and scoring is byte-identical to base.
+    const offsetByPid = new Map<string, number>()
+    for (const pid of new Set([...adjByPid.keys(), ...score1985ByPid.keys()])) {
+      offsetByPid.set(pid, (adjByPid.get(pid) ?? 0) + (score1985ByPid.get(pid) ?? 0))
+    }
+
     // First pass: ScoringRecord[] for role-bearing participants.
     const records: ScoringRecord[] = []
     for (const pdoc of participantsSnap.docs) {
@@ -144,22 +185,24 @@ export const scoreAndRecord = onCall({ cors: def.corsOrigins, secrets: [classroo
     const scorer = (role: string, outcome: Outcome | null) => def.computeRawScore(role, outcome, configData)
     const finalizedBase = computeZScoresByRole(records, def.roles, def.scoreSense, scorer)
 
-    // Adjusted pass: raw_score = 1978 base ± 1983 adjustment, then re-z within role over the
-    // adjusted raws (both Baxter roles are 'value'; scoreSense honoured for generality). No-show/
-    // late (raw_score null) pass through untouched. Inactive transform → finalized === base.
+    // Final pass: raw_score = 1978 base + offset (1983 adjustment + 1985 score), then re-z within
+    // role over the final raws (both Baxter roles are 'value'; scoreSense honoured for generality).
+    // No-show/late (raw_score null) pass through untouched. Empty offset → finalized === base.
+    // NOTE: terminal z-scoring with the degenerate-pool guard + the once-only gradebook push land
+    // in Slice 6; this re-runnable scorer keeps re-z'ing on every click exactly as it did for 1983.
     let finalized = finalizedBase
-    if (adjByPid.size > 0) {
-      const adjustedRawByPid = new Map<string, number>()
+    if (offsetByPid.size > 0) {
+      const finalRawByPid = new Map<string, number>()
       for (const f of finalizedBase) {
         if (f.raw_score == null) continue
-        adjustedRawByPid.set(f.participant_id, f.raw_score + (adjByPid.get(f.participant_id) ?? 0))
+        finalRawByPid.set(f.participant_id, f.raw_score + (offsetByPid.get(f.participant_id) ?? 0))
       }
       const zByPid = new Map<string, number>()
       for (const roleKey of def.roles.roles.map(r => r.key)) {
         const pool = finalizedBase.filter(f => f.role === roleKey && f.raw_score != null)
         const sense = def.scoreSense[roleKey] ?? 'value'
         const signed = pool.map(f => {
-          const a = adjustedRawByPid.get(f.participant_id) as number
+          const a = finalRawByPid.get(f.participant_id) as number
           return sense === 'cost' ? -a : a
         })
         const zs = zScoresSampleSD(signed)
@@ -167,7 +210,7 @@ export const scoreAndRecord = onCall({ cors: def.corsOrigins, secrets: [classroo
       }
       finalized = finalizedBase.map(f => f.raw_score == null ? f : {
         ...f,
-        raw_score: adjustedRawByPid.get(f.participant_id) ?? f.raw_score,
+        raw_score: finalRawByPid.get(f.participant_id) ?? f.raw_score,
         normalized_score: zByPid.get(f.participant_id) ?? f.normalized_score,
       })
     }

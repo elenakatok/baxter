@@ -164,17 +164,20 @@ async function pollGroupsStatus(pred, maxMs = 30_000) {
   return readGroupStatus()
 }
 
-// Full group read incl. the 1983 keyed wage + arbitration marker (nested mapValue in REST).
+// Full group read incl. the 1983 keyed wage + arbitration marker + the 1985 wage (nested
+// mapValue in REST).
 async function readGroupsFull() {
   const docs = await fsGetDocs('groups')
   return docs.map(d => {
     const o1983 = d.fields?.outcomes_by_round?.mapValue?.fields?.['1983']?.mapValue?.fields
+    const o1985 = d.fields?.outcomes_by_round?.mapValue?.fields?.['1985']?.mapValue?.fields
     const arb   = d.fields?.arbitration_1983?.mapValue?.fields
     return {
       id: d.name.split('/').pop(),
       status: strVal(d.fields?.status),
       agreement: d.fields?.agreement_reached?.booleanValue ?? null,
       wage83: o1983?.wage83 != null ? numVal(o1983.wage83) : null,
+      wage85: o1985?.wage85 != null ? numVal(o1985.wage85) : null,
       arbSide: arb?.side ? strVal(arb.side) : null,
       arbWage: arb?.wage != null ? numVal(arb.wage) : null,
     }
@@ -267,6 +270,22 @@ async function fillCanonical1978(leadPage) {
   const selects = leadPage.locator('select')
   for (let i = 0; i < ISSUE_ORDER.length; i++) {
     await selects.nth(i).selectOption(CANONICAL_1978_OUTCOME[ISSUE_ORDER[i]])
+  }
+}
+
+// ── 1985 six-issue contract (Slice 4) — one wage input + five option selects (schema order) ──
+const SELECT_ORDER_1985 = ['incentive85', 'work_rules85', 'hiring85', 'notices85', 'seniority85']
+// The two frozen conformance deals (spec §5). Deal B → Baxter 97.95 / Union 9.55; Deal A → 10.51 / 89.49.
+const DEAL_A_1985 = { wage85: '11.00', incentive85: 'above_quota', work_rules85: 'jointly_determined', hiring85: 'layoff_100',  notices85: 'yes', seniority85: 'all' }
+const DEAL_B_1985 = { wage85: '9.00',  incentive85: 'none',        work_rules85: 'mgmt_control',       hiring85: 'no_priority', notices85: 'no',  seniority85: 'none' }
+
+/** Lead fills the 1985 wage input + five option selects with a contract (does NOT submit). */
+async function fill1985(leadPage, contract) {
+  await leadPage.waitForSelector('h1:has-text("Report outcome")', { timeout: 30_000 })
+  await leadPage.locator('input[type="number"]').fill(contract.wage85)
+  const selects = leadPage.locator('select')
+  for (let i = 0; i < SELECT_ORDER_1985.length; i++) {
+    await selects.nth(i).selectOption(contract[SELECT_ORDER_1985[i]])
   }
 }
 
@@ -570,6 +589,128 @@ async function main() {
     assert(check(gidA, 'union',  43.3), 'Transform — group A Union adjusted-1978 = 43.3')
     assert(check(gidB, 'baxter', 89.6), 'Transform — group B Baxter adjusted-1978 = 89.6')
     assert(check(gidB, 'union',  36.2), 'Transform — group B Union adjusted-1978 = 36.2')
+  }
+
+  // ══ 1985 (Slice 4) — own six-issue contract, ultimatum, additive final ═══════════
+  // Group C (the 1978-rejecter) has stayed idle through 1983. To advance the whole class to
+  // 1985 (advanceRound requires EVERY group completed), C completes 1983 as a NO-DEAL. It gets
+  // NO 1983 wage → excluded from w83_avg (the transform numbers above are unaffected), and its
+  // 1983 arbitration is deliberately LEFT UNRESOLVED (resolving would give it a wage and shift the
+  // average). C also walked away in 1978 → its adjusted-1978 base is 0, which isolates its 1985
+  // component for a clean degenerate-guard read below.
+  banner('1985 — proceed 1983→1985, then own six-issue contract (ultimatum + additive final)')
+  {
+    const gC = groups83[rejectGid]; const leadC = gC.find(m => m.is_lead) ?? gC[0]; const nonC = gC.filter(m => m !== leadC)
+    await leadC.page.waitForSelector('h1:has-text("Report outcome")', { timeout: 30_000 })
+    await leadC.page.click('button:has-text("No deal")')
+    await leadC.page.waitForSelector('h1:has-text("Confirm no deal")', { timeout: 10_000 })
+    await leadC.page.click('button:has-text("Yes, no deal")')
+    await Promise.all(nonC.map(async s => {
+      await s.page.waitForSelector('h1:has-text("Confirm")', { timeout: 30_000 })
+      await s.page.click('button:has-text("Confirm")')
+    }))
+    await pollGroupsFull(g => [gidA, gidB, rejectGid].every(id => g.find(x => x.id === id)?.status === 'completed'), 30_000)
+    log('1983', `group C (${rejectGid}) no-dealed 1983 → all three groups completed; ready to proceed`)
+  }
+
+  // Proceed 1983→1985 (same-session generic advanceRound: re-opens every group; day-2 presence
+  // carries forward so students flow straight into 1985 with no re-attendance).
+  const adv = await inst('advanceRound')
+  log('instr', `advanceRound → round ${adv.current_round} (${adv.round_id})`)
+  await Promise.all(students.map(s => s.page.waitForSelector('h1:has-text("Go negotiate")', { timeout: 30_000 })))
+  assert(adv.round_id === '1985', 'Proceed — advanceRound moved the class to 1985 (students re-flow into the negotiation)')
+  // Everyone taps "We've finished" to reach the 1985 report / confirm screens.
+  await Promise.all(students.map(s => s.page.click("button:has-text(\"We've finished\")").catch(() => {})))
+
+  const parts85 = await readParticipants()
+  const groups85 = groupStudents(students, parts85)
+
+  // Group B — ULTIMATUM (1985 inherits Bug E's mechanic by declaration): lead offers a contract,
+  // ONE receiver REJECTS → TERMINAL no-deal (NO redo, NO second offer), distinct from 1983's loop.
+  const gB85 = groups85[gidB]; const leadB85 = gB85.find(m => m.is_lead) ?? gB85[0]; const nonB85 = gB85.filter(m => m !== leadB85)
+  await leadB85.page.waitForSelector('h1:has-text("Report outcome")', { timeout: 30_000 })
+  {
+    const selectCount = await leadB85.page.locator('select').count()
+    const numInputs   = await leadB85.page.locator('input[type="number"]').count()
+    assert(selectCount === 5 && numInputs === 1,
+      '1985 six-issue form RENDERS (one wage field + five option selects — its OWN contract, not 1978/1983)')
+  }
+  await fill1985(leadB85.page, DEAL_A_1985)
+  await leadB85.page.click('button:has-text("Review & submit")')
+  await leadB85.page.waitForSelector('h1:has-text("Confirm outcome")', { timeout: 10_000 })
+  await leadB85.page.click('button:has-text("Yes, submit")')
+  await nonB85[0].page.waitForSelector('h1:has-text("Confirm")', { timeout: 30_000 })
+  await nonB85[0].page.click('button:has-text("Reject")')
+  {
+    const gs = await pollGroupsFull(g => g.find(x => x.id === gidB)?.status === 'completed', 30_000)
+    const b = gs.find(x => x.id === gidB)
+    // The per-round no-deal for rounds 2+ is represented by the KEYED 1985 slot being committed
+    // null (the flat agreement_reached is round-1 scoped under Option-1 derive — B still reads
+    // true from its 1978 deal). So the terminal signal is: status completed + no 1985 wage.
+    assert(b?.status === 'completed' && b?.wage85 == null,
+      '1985 ULTIMATUM REJECT — reject reaches TERMINAL no-deal (round-3 slot committed null, status completed)')
+    const leadOnForm = await leadB85.page.locator('h1:has-text("Report outcome")').isVisible().catch(() => false)
+    assert(!leadOnForm,
+      '1985 ULTIMATUM REJECT — no redo: lead is NOT returned to the report form (distinct from 1983 redo)')
+  }
+
+  // DEGENERATE pass — score BEFORE any group deals 1985 (B rejected → no-deal; A & C idle). The
+  // re-runnable scorer must apply the degenerate-pool guard: Baxter no-deal = 50, Union = 60.
+  await inst('scoreAndRecord')
+  await sleep(1500)
+  {
+    const parts = await readParticipants()
+    const raws = (gid, role) => parts.filter(p => p.group_id === gid && p.role === role).map(p => p.raw_score)
+    const all = (arr, exp) => arr.length > 0 && arr.every(s => near(s, exp, 0.1))
+    log('1985°', parts.filter(p => [gidA, gidB, rejectGid].includes(p.group_id))
+      .map(p => `${p.id}:${p.group_id === gidA ? 'A' : p.group_id === gidB ? 'B' : 'C'}/${p.role}=${p.raw_score}`).join('  '))
+    // Group C walked away in 1978+1983 → adjusted-1978 = 0, isolating the 1985 component.
+    assert(all(raws(rejectGid, 'baxter'), 50),
+      '1985 DEGENERATE guard — 0 dealers → Baxter no-deal = 50 (group C: 0 + 50)')
+    assert(all(raws(rejectGid, 'union'), 60),
+      '1985 Union no-deal = 60 (group C: 0 + 60)')
+    // Group B Baxter = adjusted-1978 (89.6) + 50 degenerate = 139.6.
+    assert(all(raws(gidB, 'baxter'), 139.6),
+      '1985 DEGENERATE — group B Baxter = adjusted-1978 89.6 + 50 = 139.6')
+  }
+
+  // Group A DEALS 1985 (Deal B → Baxter 97.95, Union 9.55). One dealer now exists.
+  const gA85 = groups85[gidA]; const leadA85 = gA85.find(m => m.is_lead) ?? gA85[0]; const nonA85 = gA85.filter(m => m !== leadA85)
+  await fill1985(leadA85.page, DEAL_B_1985)
+  await leadA85.page.click('button:has-text("Review & submit")')
+  await leadA85.page.waitForSelector('h1:has-text("Confirm outcome")', { timeout: 10_000 })
+  await leadA85.page.click('button:has-text("Yes, submit")')
+  await Promise.all(nonA85.map(async s => {
+    await s.page.waitForSelector('h1:has-text("Confirm")', { timeout: 30_000 })
+    await s.page.click('button:has-text("Confirm")')
+  }))
+  {
+    const gs = await pollGroupsFull(g => { const a = g.find(x => x.id === gidA); return a?.status === 'completed' && a?.wage85 != null }, 30_000)
+    assert(near(gs.find(x => x.id === gidA)?.wage85, 9.00),
+      '1985 six-issue form SUBMITS — group A wage85 = $9.00 stored (continuous, server-validated)')
+  }
+
+  // NORMAL pass — re-score with one dealer (A). final raw = adjusted-1978 + 1985.
+  await inst('scoreAndRecord')
+  await sleep(1500)
+  {
+    const parts = await readParticipants()
+    const raws = (gid, role) => parts.filter(p => p.group_id === gid && p.role === role).map(p => p.raw_score)
+    const all = (arr, exp) => arr.length > 0 && arr.every(s => near(s, exp, 0.1))
+    log('1985', parts.filter(p => [gidA, gidB, rejectGid].includes(p.group_id))
+      .map(p => `${p.id}:${p.group_id === gidA ? 'A' : p.group_id === gidB ? 'B' : 'C'}/${p.role}=${p.raw_score}`).join('  '))
+    // Group A dealt Deal B (Baxter 97.95 / Union 9.55). adjusted-1978 A = Baxter 80.4 / Union 43.3.
+    assert(all(raws(gidA, 'baxter'), 178.35),
+      'Additive final — group A Baxter = adjusted-1978 80.4 + 1985 deal 97.95 = 178.35 (score matches gate)')
+    assert(all(raws(gidA, 'union'), 52.85),
+      'Additive final — group A Union = adjusted-1978 43.3 + 1985 deal 9.55 = 52.85')
+    // Union no-deal still 60: group B Union = adjusted 36.2 + 60 = 96.2.
+    assert(all(raws(gidB, 'union'), 96.2),
+      '1985 Union no-deal = 60 — group B Union = adjusted-1978 36.2 + 60 = 96.2')
+    // Baxter no-deal is now the AVG OF DEALERS (A = 97.95), NOT the degenerate 50: group C Baxter
+    // FLIPS 50 → 0 + 97.95, proving the re-runnable normal path (distinct from the degenerate guard).
+    assert(all(raws(rejectGid, 'baxter'), 97.95),
+      '1985 Baxter no-deal = avg of dealers (97.95) — group C Baxter flips 50 → 97.95 (normal path)')
   }
 
   banner(`RESULT — ${PASS} passed, ${FAIL} failed`)
