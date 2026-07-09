@@ -48,10 +48,15 @@ const SLOWMO        = process.env.SLOWMO ? Number(process.env.SLOWMO) : 0
 
 // A fresh instance id per run so re-runs never collide. (Date.now is fine in a plain script.)
 const GID = process.env.GID ?? `pt-${Date.now()}`
-// TWO groups (Slice 3): 8 students → 4 Baxter + 4 Local 190 → two groups of 2+2. One group
-// AGREES a 1983 wage (exercises the wage-only form + submit + transform); the other NO-DEALS
-// (exercises the arbitration queue + seeded resolve). w83_avg is then a real cross-group average.
-const PIDS = ['stu-1', 'stu-2', 'stu-3', 'stu-4', 'stu-5', 'stu-6', 'stu-7', 'stu-8']
+// THREE groups (Bug E): 12 students → 6 Baxter + 6 Local 190 → three groups of 2+2.
+//   • Two DEALER groups reach a 1978 deal (ACCEPT), then in 1983 one agrees a wage (form +
+//     submit + cross-group transform) and one no-deals → arbitration.
+//   • One REJECTER group hits the 1978 ULTIMATUM reject → terminal no-deal (no redo). It sits
+//     idle in 1983 (excluded from the cross-group average).
+const PIDS = [
+  'stu-1', 'stu-2', 'stu-3', 'stu-4', 'stu-5', 'stu-6',
+  'stu-7', 'stu-8', 'stu-9', 'stu-10', 'stu-11', 'stu-12',
+]
 
 const ROLE_RADIO = {
   baxter: 'Baxter Management — the Adam Baxter Company management team',
@@ -168,6 +173,7 @@ async function readGroupsFull() {
     return {
       id: d.name.split('/').pop(),
       status: strVal(d.fields?.status),
+      agreement: d.fields?.agreement_reached?.booleanValue ?? null,
       wage83: o1983?.wage83 != null ? numVal(o1983.wage83) : null,
       arbSide: arb?.side ? strVal(arb.side) : null,
       arbWage: arb?.wage != null ? numVal(arb.wage) : null,
@@ -251,51 +257,91 @@ async function reAttend(page, pid, code) {
   log(pid, 're-attended for 1983')
 }
 
-// ── 1978 negotiation: group reveal → off-platform → report canonical deal ───────
+// ── 1978 negotiation: 2 groups ACCEPT (deal), 1 group ULTIMATUM-REJECTS ─────────
+
+const ISSUE_ORDER = ['wages', 'plant_operation', 'escalator', 'incentive', 'location', 'transfer']
+
+/** Lead fills the six 1978 <select>s with the canonical deal (does NOT submit). */
+async function fillCanonical1978(leadPage) {
+  await leadPage.waitForSelector('h1:has-text("Report outcome")', { timeout: 30_000 })
+  const selects = leadPage.locator('select')
+  for (let i = 0; i < ISSUE_ORDER.length; i++) {
+    await selects.nth(i).selectOption(CANONICAL_1978_OUTCOME[ISSUE_ORDER[i]])
+  }
+}
 
 async function drive1978Negotiation(students) {
-  banner('1978 negotiation → canonical deal')
+  banner('1978 negotiation → 2 groups ACCEPT (deal), 1 group ULTIMATUM-REJECTS')
   // group reveal
   await Promise.all(students.map(async s => {
     await s.page.waitForSelector('h1:has-text("Your negotiation group")', { timeout: 60_000 })
     log(s.pid, 'group reveal')
   }))
-  // one Start click; the rest auto-advance (or click as fallback)
+  // one Start click per group; the rest auto-advance (or click as fallback)
   await students[0].page.click('button:has-text("Start negotiation")')
   await students[0].page.waitForSelector('h1:has-text("Go negotiate")', { timeout: 20_000 })
   for (const s of students.slice(1)) {
     const flipped = await s.page.waitForSelector('h1:has-text("Go negotiate")', { timeout: 12_000 }).then(() => true).catch(() => false)
     if (!flipped) { await s.page.click('button:has-text("Start negotiation")'); await s.page.waitForSelector('h1:has-text("Go negotiate")', { timeout: 12_000 }) }
-    log(s.pid, 'off-platform')
   }
   // Everyone taps "We've finished" so leads reach the report form and non-leads reach confirm.
   await Promise.all(students.map(s => s.page.click("button:has-text(\"We've finished\")").catch(() => {})))
 
-  // Per-group: the group's lead reports the SAME canonical 1978 deal; its non-leads confirm.
-  const order = ['wages', 'plant_operation', 'escalator', 'incentive', 'location', 'transfer']
   const parts = await readParticipants()
   const groups = groupStudents(students, parts)
-  log('1978', `${Object.keys(groups).length} group(s): ${Object.keys(groups).join(', ')}`)
-  await Promise.all(Object.entries(groups).map(async ([gid, members]) => {
+  const gids = Object.keys(groups).sort()
+  const rejectGid = gids[gids.length - 1]           // last group is the ultimatum-rejecter
+  const dealerGids = gids.filter(g => g !== rejectGid)
+  log('1978', `${gids.length} groups — dealers=${dealerGids.join(',')} · rejecter=${rejectGid}`)
+
+  // DEALER groups: lead reports the canonical deal; all non-leads Confirm (accept) → deal.
+  // Under the 1978 ULTIMATUM this all-accept path is exactly the 'committed' deal branch.
+  await Promise.all(dealerGids.map(async gid => {
+    const members = groups[gid]
     const lead = members.find(m => m.is_lead) ?? members[0]
     const nonLeads = members.filter(m => m !== lead)
-    log(lead.pid, `lead of ${gid} — filling canonical 1978 deal`)
-    await lead.page.waitForSelector('h1:has-text("Report outcome")', { timeout: 30_000 })
-    const selects = lead.page.locator('select')
-    for (let i = 0; i < order.length; i++) {
-      await selects.nth(i).selectOption(CANONICAL_1978_OUTCOME[order[i]])
-    }
+    await fillCanonical1978(lead.page)
     await lead.page.click('button:has-text("Review & submit")')
     await lead.page.waitForSelector('h1:has-text("Confirm outcome")', { timeout: 10_000 })
     await lead.page.click('button:has-text("Yes, submit")')
     await Promise.all(nonLeads.map(async s => {
       await s.page.waitForSelector('h1:has-text("Confirm")', { timeout: 30_000 })
       await s.page.click('button:has-text("Confirm")')
-      log(s.pid, `confirmed (${gid})`)
     }))
+    log(gid, `dealer — 1978 deal accepted`)
   }))
-  const gs = await pollGroupsStatus(g => g.length >= 2 && g.every(x => x.status === 'completed'))
-  assert(gs.length >= 2 && gs.every(x => x.status === 'completed'), '1978 — both groups reach "completed"')
+
+  // REJECTER group (1978 ULTIMATUM): lead reports an offer, ONE receiver REJECTS. Under the
+  // ultimatum that single reject is TERMINAL no-deal — NO reset, NO redo, NO second offer.
+  const rMembers = groups[rejectGid]
+  const rLead = rMembers.find(m => m.is_lead) ?? rMembers[0]
+  const rNonLeads = rMembers.filter(m => m !== rLead)
+  await fillCanonical1978(rLead.page)
+  await rLead.page.click('button:has-text("Review & submit")')
+  await rLead.page.waitForSelector('h1:has-text("Confirm outcome")', { timeout: 10_000 })
+  await rLead.page.click('button:has-text("Yes, submit")')
+  const rejecter = rNonLeads[0]
+  await rejecter.page.waitForSelector('h1:has-text("Confirm")', { timeout: 30_000 })
+  await rejecter.page.click('button:has-text("Reject")')
+  log(rejectGid, `rejecter ${rejecter.pid} clicked Reject (1978 ultimatum)`)
+
+  // Wait: dealers completed (deal); rejecter completed with NO deal.
+  const gs = await pollGroupsFull(g => {
+    const rj = g.find(x => x.id === rejectGid)
+    return rj && rj.status === 'completed' && dealerGids.every(id => g.find(x => x.id === id)?.status === 'completed')
+  }, 40_000)
+  const rj = gs.find(x => x.id === rejectGid)
+  assert(dealerGids.every(id => gs.find(x => x.id === id)?.status === 'completed' && gs.find(x => x.id === id)?.agreement === true),
+    '1978 ACCEPT — dealer groups reach a "completed" DEAL')
+  assert(rj?.status === 'completed' && rj?.agreement === false,
+    '1978 ULTIMATUM REJECT — reject reaches TERMINAL no-deal (completed, no agreement; not reset/deadlocked)')
+  // No redo / no second offer: the reject lead must NOT be sitting on a fresh report form.
+  const leadOnReportForm = await rLead.page.locator('h1:has-text("Report outcome")').isVisible().catch(() => false)
+  assert(!leadOnReportForm,
+    '1978 ULTIMATUM REJECT — no redo: reject lead is NOT returned to the report form (no second offer)')
+
+  const dealerMemberPids = dealerGids.flatMap(id => groups[id].map(m => m.pid))
+  return { dealerGids, rejectGid, dealerMemberPids }
 }
 
 // ── MAIN ──────────────────────────────────────────────────────────────────────
@@ -337,19 +383,20 @@ async function main() {
     assert(!visible, '#1 — "Open Round 2 Attendance" HIDDEN before round-1 groups complete')
   }
 
-  // 4. 1978 negotiation → canonical deal → completed.
-  await drive1978Negotiation(students)
+  // 4. 1978 negotiation → 2 dealer groups deal, 1 rejecter hits the ultimatum terminal no-deal.
+  const { dealerGids, rejectGid, dealerMemberPids } = await drive1978Negotiation(students)
 
-  // 5. Score & Record → assert Baxter 85 / Union 62.
+  // 5. Score & Record → the DEALER groups score Baxter 85 / Union 62 (the rejecter is no-deal).
   await inst('scoreAndRecord')
   await sleep(1500)
   {
     const parts = await readParticipants()
-    const bax = parts.filter(p => p.role === 'baxter')
-    const uni = parts.filter(p => p.role === 'union')
+    const dealers = parts.filter(p => dealerMemberPids.includes(p.id))
+    const bax = dealers.filter(p => p.role === 'baxter')
+    const uni = dealers.filter(p => p.role === 'union')
     log('score', parts.map(p => `${p.id}:${p.role}=${p.raw_score}`).join('  '))
-    assert(bax.length > 0 && bax.every(p => p.raw_score === EXPECTED_1978_SCORES.baxter), `Scoring — every Baxter = ${EXPECTED_1978_SCORES.baxter}`)
-    assert(uni.length > 0 && uni.every(p => p.raw_score === EXPECTED_1978_SCORES.union),  `Scoring — every Union = ${EXPECTED_1978_SCORES.union}`)
+    assert(bax.length > 0 && bax.every(p => p.raw_score === EXPECTED_1978_SCORES.baxter), `Scoring — every dealer Baxter = ${EXPECTED_1978_SCORES.baxter}`)
+    assert(uni.length > 0 && uni.every(p => p.raw_score === EXPECTED_1978_SCORES.union),  `Scoring — every dealer Union = ${EXPECTED_1978_SCORES.union}`)
   }
 
   // #1 (part b): now that round 1 is completed, the gate button appears → drive it.
@@ -399,18 +446,20 @@ async function main() {
     assert(!stillThere, 'B — "Begin 1983" does NOT reappear once the round has begun')
   }
 
-  // ── Slice 3: 1983 wage-only form + arbitration + score-transform ──────────────
-  banner('1983 negotiation — group A agrees a wage, group B no-deals')
+  // ── Slice 3 + 1983 redo-loop: A redo→deal a wage, B no-deals, C (rejecter) idle ──
+  banner('1983 negotiation — group A redo→deal a wage, group B no-deals')
   // Everyone taps "We've finished" to reach the 1983 report / confirm screens.
   await Promise.all(students.map(s => s.page.click("button:has-text(\"We've finished\")").catch(() => {})))
 
   const parts83 = await readParticipants()
   const groups83 = groupStudents(students, parts83)
-  const gids = Object.keys(groups83).sort()
-  const [gidA, gidB] = gids
-  log('1983', `group A=${gidA} (agree $9.50) · group B=${gidB} (no deal → arbitration)`)
+  // A/B are the two DEALER groups (they have a 1978 wage); the rejecter (C) stays idle in 1983.
+  const [gidA, gidB] = dealerGids
+  log('1983', `group A=${gidA} (redo→$9.50) · group B=${gidB} (no deal→arbitration) · idle rejecter=${rejectGid}`)
 
-  // Group A — wage-only form: assert ONLY the wage field renders, then submit $9.50 (continuous).
+  // Group A — wage-only form: assert ONLY the wage field renders. Then exercise the 1983
+  // STANDARD ACCEPT/REDO loop (unchanged — 1983 is NOT ultimatum): first offer $9.50 is
+  // REJECTED → the round RESETS (lead re-reports) → re-offer $9.50 → all accept → deal.
   const gA = groups83[gidA]; const leadA = gA.find(m => m.is_lead) ?? gA[0]; const nonA = gA.filter(m => m !== leadA)
   await leadA.page.waitForSelector('h1:has-text("Report outcome")', { timeout: 30_000 })
   {
@@ -419,6 +468,19 @@ async function main() {
     assert(selectCount === 0 && numInputs === 1,
       '1983 wage-only form RENDERS (one numeric wage field, none of the six 1978 selects)')
   }
+  // First offer → one receiver REJECTS.
+  await leadA.page.locator('input[type="number"]').fill('9.50')
+  await leadA.page.click('button:has-text("Review & submit")')
+  await leadA.page.waitForSelector('h1:has-text("Confirm outcome")', { timeout: 10_000 })
+  await leadA.page.click('button:has-text("Yes, submit")')
+  await nonA[0].page.waitForSelector('h1:has-text("Confirm")', { timeout: 30_000 })
+  await nonA[0].page.click('button:has-text("Reject")')
+  // 1983 stays on the accept/REDO loop → reject RESETS: the lead is sent back to re-report.
+  const redoOffered = await leadA.page.waitForSelector('h1:has-text("Report outcome")', { timeout: 20_000 })
+    .then(() => true).catch(() => false)
+  assert(redoOffered,
+    '1983 STANDARD LOOP — a reject RESETS the round (lead re-reports; redo loop intact, NOT terminal)')
+  // Re-offer the same wage → ALL receivers (incl. the earlier rejecter, now pending again) accept.
   await leadA.page.locator('input[type="number"]').fill('9.50')
   await leadA.page.click('button:has-text("Review & submit")')
   await leadA.page.waitForSelector('h1:has-text("Confirm outcome")', { timeout: 10_000 })
@@ -427,7 +489,7 @@ async function main() {
     await s.page.waitForSelector('h1:has-text("Confirm")', { timeout: 30_000 })
     await s.page.click('button:has-text("Confirm")')
   }))
-  log('1983', `group A lead ${leadA.pid} submitted $9.50; non-leads confirmed`)
+  log('1983', `group A lead ${leadA.pid} re-offered $9.50 after a reject; all accepted`)
 
   // Group B — no deal (forces the arbitration path).
   const gB = groups83[gidB]; const leadB = gB.find(m => m.is_lead) ?? gB[0]; const nonB = gB.filter(m => m !== leadB)
@@ -441,8 +503,11 @@ async function main() {
   }))
   log('1983', `group B lead ${leadB.pid} reported NO DEAL; non-leads confirmed`)
 
-  const g83 = await pollGroupsFull(
-    g => g.length >= 2 && g.every(x => x.status === 'completed' || x.status === 'deadlocked'), 40_000)
+  // Target the two dealer groups specifically (the rejecter C stays 'negotiating', idle).
+  const g83 = await pollGroupsFull(g => {
+    const a = g.find(x => x.id === gidA), b = g.find(x => x.id === gidB)
+    return near(a?.wage83, 9.50) && b?.status === 'completed' && b?.wage83 == null
+  }, 40_000)
   assert(near(g83.find(x => x.id === gidA)?.wage83, 9.50),
     '1983 wage-only form SUBMITS — group A wage83 = $9.50 stored (continuous, server-validated)')
   assert(g83.find(x => x.id === gidB)?.wage83 == null,

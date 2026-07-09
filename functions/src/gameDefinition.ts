@@ -95,6 +95,11 @@ export const baxterGameDef: GameDefinition = {
   outcomeSchema: baxterSchema,
   // 1983 negotiates a wage only; other rounds fall back to the six-issue baxterSchema.
   roundOutcomeSchemas: { '1983': baxter1983Schema },
+  // Ratification mechanic per round (Bug E). 1978 is an ULTIMATUM: the receiver gets one
+  // accept/reject; reject → terminal no-deal (routes to the 1978 no-deal handling, Slice 5).
+  // 1983 stays on the standard accept/redo loop (omitted → 'unanimous'). 1985 will REUSE this
+  // exact mechanic by adding '1985': 'ultimatum' here when its content ships (Slice 4).
+  roundOutcomeMechanics: { '1978': 'ultimatum' },
   computeRawScore,
   computeScoreBreakdown,
   reservations: { baxter: 0, union: 0 },  // unused by the 1978 sum scorer (no surplus/reservation model)
