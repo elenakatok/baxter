@@ -150,6 +150,10 @@ async function routeToPhase(
     // GroupReveal whose "Start negotiation" button would 400 against a not-yet-reopened group.
     // Once the round has begun, a 'completed' group means this round is genuinely resolved.
     if (currentRound > 0 && !round2Begun) return { name: 'day2-hold', groupId }
+    // 1983 (round index 1) is a MID-game round: keep the student on the live OutcomeReporting
+    // completed view (no terminal debrief) so a no-agreement group's view flips from "No deal"
+    // to the arbitrated wage the moment the instructor resolves it. Other rounds → shared Results.
+    if (currentRound === 1) return { name: 'outcome-reporting', groupId, isLead: d.is_lead === true }
     return { name: 'results', groupId }
   }
 
@@ -603,7 +607,11 @@ export default function Play() {
           isLead={phase.isLead}
           args={{}}
           roundId={BAXTER_ROUNDS[currentRound]}
-          onComplete={() => setPhase({ name: 'results', groupId: phase.groupId })}
+          onComplete={() => {
+            // 1983 (round index 1) is mid-game: stay on the live completed view so the
+            // arbitration flip is visible. Other rounds advance to the shared Results/debrief.
+            if (currentRound !== 1) setPhase({ name: 'results', groupId: phase.groupId })
+          }}
         />
       )}
 

@@ -448,6 +448,15 @@ async function main() {
   assert(g83.find(x => x.id === gidB)?.wage83 == null,
     '1983 no-deal — group B ended with NO agreed wage')
 
+  // Pre-resolution: a group-B student correctly sees "No deal" (awaiting arbitration) — CORRECT.
+  const bStudent = groups83[gidB][0]
+  {
+    await bStudent.page.waitForSelector('h1:has-text("Outcome locked")', { timeout: 30_000 })
+    const txt = await bStudent.page.locator('main').innerText()
+    assert(/no deal/i.test(txt) && !/\$/.test(txt),
+      'Arbitrated-view — group B student sees "No deal" BEFORE arbitration (correct pre-resolution state)')
+  }
+
   // ── Arbitration: group B auto-flagged → seeded resolve → $8.67 (Baxter branch) ──
   banner('arbitration — group B auto-flagged → seeded resolve')
   await dash.reload(); await sleep(2500)
@@ -461,6 +470,17 @@ async function main() {
   const g83b = await pollGroupsFull(g => near(g.find(x => x.id === gidB)?.wage83, 8.67), 15_000)
   assert(near(g83b.find(x => x.id === gidB)?.wage83, 8.67),
     'Arbitration — group B 1983 slot now holds the arbitrated $8.67')
+
+  // Post-resolution: the group-B student's LIVE view FLIPS from "No deal" to the arbitrated wage
+  // (the arbitration_1983 write reaches the open OutcomeReporting snapshot — no reload).
+  {
+    await bStudent.page.waitForFunction(
+      () => /8\.67/.test(document.querySelector('main')?.innerText ?? ''), null, { timeout: 20_000 },
+    ).catch(() => {})
+    const txt = await bStudent.page.locator('main').innerText()
+    assert(/8\.67/.test(txt) && /arbitration/i.test(txt) && !/no deal reached/i.test(txt),
+      'Arbitrated-view — group B student view FLIPS to the arbitrated $8.67 (no longer "No deal")')
+  }
 
   // ── Score-transform: Score & Record → adjusted-1978 (cross-group w83_avg) ───────
   banner('score-transform — Score & Record → adjusted-1978')

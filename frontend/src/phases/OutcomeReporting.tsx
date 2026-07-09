@@ -67,6 +67,9 @@ type GroupData = {
   // because a whole role was absent for the round, rather than a genuine negotiation impasse.
   day2_deadlock_reason?: string | null
   day2_missing_roles?: string[] | null
+  // 1983 arbitration (Slice 3): written by resolveArbitration when a no-agreement 1983 group is
+  // resolved at the front of class. Its presence flips this view from "No deal" to the wage.
+  arbitration_1983?: { side: 'baxter' | 'union'; wage: number } | null
 }
 
 type Props = {
@@ -219,11 +222,23 @@ export default function OutcomeReporting({
 
   // ── Completed ─────────────────────────────────────────────────────────────────
   if (status === 'completed') {
+    // 1983 arbitration flip (Slice 3): a no-agreement 1983 group shows "No deal" UNTIL the
+    // instructor resolves its arbitration. resolveArbitration writes arbitration_1983 (+ the
+    // 1983 wage) to this group doc; the live snapshot above then re-renders this branch, so the
+    // view flips from "No deal" to the arbitrated wage without a reload.
+    const arb = roundId === '1983' ? groupData.arbitration_1983 : null
     return (
       <main style={mainStyle}>
         <p style={subtitleStyle}>You are {roleLabel}</p>
         <h1 style={h1Style}>Outcome locked</h1>
-        {groupData.agreement_reached && lead_outcome != null ? (
+        {arb != null ? (
+          <>
+            <p style={{ fontSize: '1.05rem', color: '#555', marginBottom: '0.5rem' }}>
+              Your 1983 wage was set by <strong>arbitration</strong> — {arb.side === 'baxter' ? "Baxter's rules" : "the Union's rules"} applied.
+            </p>
+            <OutcomeCard schema={schema} outcome={{ wage83: arb.wage }} />
+          </>
+        ) : groupData.agreement_reached && lead_outcome != null ? (
           <OutcomeCard schema={schema} outcome={lead_outcome} />
         ) : (
           <p style={{ fontSize: '1.05rem', color: '#555' }}>No deal reached.</p>
