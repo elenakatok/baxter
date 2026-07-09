@@ -146,9 +146,14 @@ export const baxterGameDef: GameDefinition = {
     ]},
   ],
 
-  // KC content is OPEN (spec §8). Ship ONLY the mandatory role-identification gate
-  // (one per role, system + ungraded) so validateKCGate passes. Graded KC + prep
-  // reflection questions are a later slice.
+  // KC content (Slice 7). The mandatory role-identification gate (one per role, system +
+  // ungraded, grading:'assigned_role' — exactly one per role, enforced by validateKCGate) plus:
+  //   • FOUR graded static MC (role_target:'all' → SHARED across both roles), correct B/B/C/B,
+  //     denominator 4 (negotiation-on-the-merits: interests, ongoing relationship, BATNA, one-text).
+  //   • ONE ungraded free-text reflection (category:'preparation') — ranks the student's issues.
+  //   • THREE ungraded 1–7 Likert items (category:'debrief', type:'likert') — the "Looking ahead to
+  //     1985" between-rounds set, served by getDebriefQuestions and rendered AFTER 1978 / before 1983
+  //     by the LookingAhead phase (excluded from the graded denominator and from the terminal Results).
   prepDefaults: [
     {
       field: 'kc_gate_baxter', type: 'mc', system: true,
@@ -173,6 +178,111 @@ export const baxterGameDef: GameDefinition = {
         { value: 'union',  label: 'Local 190 — the union bargaining committee' },
       ],
       explanation: 'You are Local 190, negotiating the contract on behalf of the union membership.',
+    },
+
+    // ── FOUR graded static MC (SHARED — role_target:'all'; correct B/B/C/B; denominator 4) ──
+    {
+      field: 'kc_q1_merits', type: 'mc', system: false,
+      category: 'knowledge_check', format: 'multiple_choice',
+      grading: 'static', correct_value: 'B', role_target: 'all',
+      prompt: 'At the bargaining table, the other side opens by stating a firm demand and criticizing your team’s proposal rather than discussing underlying concerns. Which response best reflects a principled approach to redirecting the conversation toward the merits?',
+      placeholder: '', order: 10, hidden: false, deletable: false,
+      options: [
+        { value: 'A', label: 'Restate your own position more forcefully so they know you won’t be moved' },
+        { value: 'B', label: 'Ask what interests or concerns their demand is meant to address, and treat it as one option to be examined rather than accepted or rejected' },
+        { value: 'C', label: 'Counter their criticism by pointing out the weaknesses in their position' },
+        { value: 'D', label: 'Break off talks until they agree to bargain more reasonably' },
+      ],
+      explanation: 'A principled approach redirects a demand or attack into a question about the interests behind it, treating each position as one option to be examined against the merits rather than something to accept or reject outright.',
+    },
+    {
+      field: 'kc_q2_relationship', type: 'mc', system: false,
+      category: 'knowledge_check', format: 'multiple_choice',
+      grading: 'static', correct_value: 'B', role_target: 'all',
+      prompt: 'Because Baxter and Local 190 operate under a permanent working agreement and expect to keep dealing with each other for years, a negotiator is weighing how hard to push for maximum short-term advantage. What does this ongoing relationship most directly imply for tactics at the table?',
+      placeholder: '', order: 11, hidden: false, deletable: false,
+      options: [
+        { value: 'A', label: 'The long relationship is irrelevant once a specific contract is being negotiated' },
+        { value: 'B', label: 'Tactics that win concessions now but leave the other side feeling cheated can damage a relationship both sides will depend on in future rounds' },
+        { value: 'C', label: 'Whichever side has more leverage this round should extract as much as possible while it can' },
+        { value: 'D', label: 'Trust between the parties removes any need to rely on objective standards' },
+      ],
+      explanation: 'When the parties expect to keep dealing with each other, short-term wins bought by leaving the other side feeling cheated can damage a relationship both sides will depend on in later rounds.',
+    },
+    {
+      field: 'kc_q3_batna', type: 'mc', system: false,
+      category: 'knowledge_check', format: 'multiple_choice',
+      grading: 'static', correct_value: 'C', role_target: 'all',
+      prompt: 'Suppose one side believes it holds the stronger position going into these talks. According to the principle of negotiating on the merits, how should the weaker party most effectively increase its influence over the outcome?',
+      placeholder: '', order: 12, hidden: false, deletable: false,
+      options: [
+        { value: 'A', label: 'Match the stronger party’s shows of power with threats of its own' },
+        { value: 'B', label: 'Concede early to preserve goodwill for later rounds' },
+        { value: 'C', label: 'Improve and rely on its best alternative to a negotiated agreement, and press to have principles and objective standards govern the discussion' },
+        { value: 'D', label: 'Insist that the stronger party make the first offer on every issue' },
+      ],
+      explanation: 'The weaker party gains influence by improving and relying on its best alternative to a negotiated agreement and by pressing for principles and objective standards to govern the discussion, rather than trading threats.',
+    },
+    {
+      field: 'kc_q4_onetext', type: 'mc', system: false,
+      category: 'knowledge_check', format: 'multiple_choice',
+      grading: 'static', correct_value: 'B', role_target: 'all',
+      prompt: 'Imagine the two teams have dug into opposing plans and communication has soured, with each concession only inviting demands for more. Which method is specifically intended to break this dynamic by having a neutral draft a single proposal, invite criticism from both sides, and revise it repeatedly before asking for a yes-or-no decision?',
+      placeholder: '', order: 13, hidden: false, deletable: false,
+      options: [
+        { value: 'A', label: 'Positional bargaining' },
+        { value: 'B', label: 'The one-text procedure' },
+        { value: 'C', label: 'Pattern bargaining' },
+        { value: 'D', label: 'A guaranteed-annual-wage clause' },
+      ],
+      explanation: 'The one-text procedure has a neutral draft a single proposal, invite criticism from both sides, and revise it repeatedly before asking for a single yes-or-no decision — breaking the escalation of dug-in positional bargaining.',
+    },
+
+    // ── ONE ungraded free-text reflection (category:'preparation', SHARED) ──
+    {
+      field: 'prep_issue_ranking', type: 'text', system: false,
+      category: 'preparation', format: 'text', role_target: 'all',
+      prompt: 'For the Baxter negotiation, make a list of the issues your role faces. Put them in rank order, with 1 being the most important.',
+      placeholder: 'e.g. 1. Wages  2. Job security  3. …', order: 20, hidden: false, deletable: true,
+    },
+
+    // ── THREE ungraded 1–7 Likert items (category:'debrief', type:'likert', SHARED) ──
+    // "Looking ahead to 1985" — served by getDebriefQuestions, rendered AFTER 1978 / before 1983.
+    {
+      field: 'debrief_relationship_1978', type: 'likert', system: false,
+      category: 'debrief', format: 'likert', role_target: 'all',
+      prompt: 'How would you characterize the working relationship between the two sides at the end of the 1978 negotiation?',
+      placeholder: '', order: 30, hidden: false, deletable: true,
+      options: [
+        { value: '1', label: 'Very poor' },
+        { value: '2', label: '' }, { value: '3', label: '' }, { value: '4', label: '' },
+        { value: '5', label: '' }, { value: '6', label: '' },
+        { value: '7', label: 'Very good' },
+      ],
+    },
+    {
+      field: 'debrief_trust_future', type: 'likert', system: false,
+      category: 'debrief', format: 'likert', role_target: 'all',
+      prompt: 'How much do you trust the other side in future negotiations?',
+      placeholder: '', order: 31, hidden: false, deletable: true,
+      options: [
+        { value: '1', label: 'Not at all' },
+        { value: '2', label: '' }, { value: '3', label: '' }, { value: '4', label: '' },
+        { value: '5', label: '' }, { value: '6', label: '' },
+        { value: '7', label: 'Completely' },
+      ],
+    },
+    {
+      field: 'debrief_1985_difficulty', type: 'likert', system: false,
+      category: 'debrief', format: 'likert', role_target: 'all',
+      prompt: 'How difficult do you expect the 1985 negotiation to be compared with 1978?',
+      placeholder: '', order: 32, hidden: false, deletable: true,
+      options: [
+        { value: '1', label: 'Much easier' },
+        { value: '2', label: '' }, { value: '3', label: '' }, { value: '4', label: '' },
+        { value: '5', label: '' }, { value: '6', label: '' },
+        { value: '7', label: 'Much harder' },
+      ],
     },
   ],
 

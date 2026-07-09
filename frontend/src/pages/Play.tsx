@@ -13,6 +13,7 @@ import {
   GroupReveal,
   OffPlatformHolding,
   Results,
+  LookingAhead,
   typography,
   colors,
   layout,
@@ -38,6 +39,7 @@ type GamePhase =
   | { name: 'day2-hold';       groupId: string }
   | { name: 'off-platform';    groupId: string }
   | { name: 'outcome-reporting'; groupId: string; isLead: boolean }
+  | { name: 'looking-ahead';   groupId: string }
   | { name: 'results';         groupId: string }
 
 // Linear rank of the student's phase progression. Consulted ONLY by the reactive router's
@@ -49,7 +51,7 @@ type GamePhase =
 // exclusive post-waiting-room screens (round 1 vs day 2) and share a rank.
 const PHASE_ORDER: GamePhase['name'][] = [
   'loading', 'error', 'info', 'kc', 'prep', 'hold', 'confirmation', 'attendance-code',
-  'waiting-room', 'group-reveal', 'day2-hold', 'off-platform', 'outcome-reporting', 'results',
+  'waiting-room', 'group-reveal', 'day2-hold', 'off-platform', 'outcome-reporting', 'looking-ahead', 'results',
 ]
 function phaseRank(name: GamePhase['name']): number {
   const i = PHASE_ORDER.indexOf(name)
@@ -161,6 +163,11 @@ async function routeToPhase(
     // completed view (no terminal debrief) so a no-agreement group's view flips from "No deal"
     // to the arbitrated wage the moment the instructor resolves it. Other rounds → shared Results.
     if (currentRound === 1) return { name: 'outcome-reporting', groupId, isLead: d.is_lead === true }
+    // 1978 (round index 0) is over: show the "Looking ahead to 1985" Likert set ONCE (before the
+    // 1978 results view). Skipped for 1985 (terminal round) and once already submitted. When the
+    // instructor advances to 1983, the attendance gate above pre-empts this and pulls the student
+    // to the code screen — so it never blocks the class-level advance.
+    if (currentRound === 0 && d.looking_ahead_submitted_at == null) return { name: 'looking-ahead', groupId }
     return { name: 'results', groupId }
   }
 
@@ -615,10 +622,23 @@ export default function Play() {
           args={{}}
           roundId={BAXTER_ROUNDS[currentRound]}
           onComplete={() => {
-            // 1983 (round index 1) is mid-game: stay on the live completed view so the
-            // arbitration flip is visible. Other rounds advance to the shared Results/debrief.
-            if (currentRound !== 1) setPhase({ name: 'results', groupId: phase.groupId })
+            // 1983 (round index 1) is mid-game: stay on the live completed view so the arbitration
+            // flip is visible. 1978 (round 0) → the "Looking ahead to 1985" Likert set first; other
+            // rounds (1985) → the shared Results/debrief.
+            if (currentRound === 1) return
+            if (currentRound === 0) setPhase({ name: 'looking-ahead', groupId: phase.groupId })
+            else setPhase({ name: 'results', groupId: phase.groupId })
           }}
+        />
+      )}
+
+      {phase.name === 'looking-ahead' && (
+        <LookingAhead
+          participantId={participantId}
+          gameInstanceId={gameInstanceId}
+          functions={functions}
+          db={db}
+          onComplete={() => setPhase({ name: 'results', groupId: phase.groupId })}
         />
       )}
 

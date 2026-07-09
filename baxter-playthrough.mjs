@@ -137,6 +137,8 @@ async function callFn(name, data) {
 }
 // Instructor calls travel with the emulator _dev bypass (no JWT needed in the emulator).
 const inst = (name, extra = {}) => callFn(name, { _dev: { game_instance_id: GID }, ...extra })
+// Student callables travel with the emulator _test bypass (participant + instance id, no JWT).
+const stu = (name, pid, extra = {}) => callFn(name, { _test: { participant_id: pid, game_instance_id: GID }, ...extra })
 
 // ── Mock classroom callback (Slice 6): stand in for receiveGameResult so the harness can OBSERVE
 // the gradebook push. scoreAndRecord's dispatchResults POSTs one GameResult per participant to this
@@ -183,6 +185,15 @@ async function readParticipants() {
     group_id:         strVal(d.fields?.group_id),
   }))
 }
+/** Raw Firestore fields map for one participant (for KC score / Likert response assertions). */
+async function readParticipantFields(pid) {
+  const res = await fetch(`${FIRESTORE}/game_instances/${GID}/participants/${pid}`, {
+    headers: { Authorization: 'Bearer owner' },
+  })
+  if (!res.ok) return {}
+  return (await res.json()).fields ?? {}
+}
+
 async function readGroupStatus() {
   const docs = await fsGetDocs('groups')
   return docs.map(d => ({ id: d.name.split('/').pop(), status: strVal(d.fields?.status) }))
@@ -244,7 +255,21 @@ const near = (a, b, tol = 0.05) => typeof a === 'number' && Math.abs(a - b) <= t
 const studentUrl = pid => `${FE}/?_pid=${pid}&_gid=${GID}&_session=tab`
 const dashboardUrl = () => `${FE}/dashboard?_dev_game_instance_id=${encodeURIComponent(GID)}&_session=tab`
 
-// ── Phase 1a: info → KC gate → (prep auto-skips) → hold ─────────────────────────
+// ── Phase 1a: info → KC gate → 4 graded static MC → reflection → hold (Slice 7) ──
+
+// The four graded static KC questions (correct B/B/C/B). Options are SERVER-SHUFFLED per student,
+// so we click by a distinctive label substring (regex) — never by position. KC_WRONG_PID answers
+// Q1 with a WRONG option to prove partial scoring (3/4 = 0.75) + denominator 4 (gate excluded).
+const KC_STATICS = [
+  { n: 1, correct: /Ask what interests or concerns/, wrong: /Restate your own position/ },
+  { n: 2, correct: /leave the other side feeling cheated/ },
+  { n: 3, correct: /best alternative to a negotiated agreement/ },
+  { n: 4, correct: /one-text procedure/ },
+]
+const KC_WRONG_PID = 'stu-1'
+
+// The three "Looking ahead to 1985" Likert fields (between-rounds, after 1978 / before 1983).
+const LIKERT_FIELDS = ['debrief_relationship_1978', 'debrief_trust_future', 'debrief_1985_difficulty']
 
 async function driveSetup(page, pid) {
   await page.goto(studentUrl(pid))
@@ -254,14 +279,44 @@ async function driveSetup(page, pid) {
   log(pid, `info: "${roleLabel}" (${role}) → Continue`)
   await page.click('button:has-text("Continue")')
 
-  // KC role gate (Baxter has no graded static KC → completing the gate finishes KC; prep is empty → auto-skips).
+  // KC role gate (ungraded, REQUIRED to proceed — excluded from the graded denominator).
   await page.waitForSelector('text=What is your role in this negotiation?', { timeout: 30_000 })
   await page.getByRole('radio', { name: ROLE_RADIO[role], exact: true }).click()
   await page.click('button:has-text("Submit")')
 
+  // FOUR graded static MC (shared, both roles). Submit → see Correct/Incorrect → Continue.
+  for (const q of KC_STATICS) {
+    await page.waitForSelector(`p:has-text("Concept check — ${q.n} of 4")`, { timeout: 30_000 })
+    const label = (pid === KC_WRONG_PID && q.wrong) ? q.wrong : q.correct
+    await page.getByRole('radio', { name: label }).click()
+    await page.click('button:has-text("Submit")')
+    await page.waitForSelector('button:has-text("Continue")', { timeout: 20_000 })
+    await page.click('button:has-text("Continue")')
+  }
+
+  // ONE ungraded free-text reflection (prep phase, before 1978).
+  await page.waitForSelector('p:has-text("Preparation — 1 of 1")', { timeout: 30_000 })
+  await page.locator('textarea').fill(`${role} priorities: 1. Wages  2. Job security  3. Work rules`)
+  await page.click('button:has-text("Complete")')
+
   await page.waitForSelector('h1:has-text("Preparation complete")', { timeout: 30_000 })
   log(pid, '◆ hold screen')
   return { page, pid, role }
+}
+
+// ── Between-rounds "Looking ahead to 1985" Likert set (after 1978, before 1983) ──
+async function driveLookingAhead(s) {
+  const { page, pid } = s
+  await page.waitForSelector('h1:has-text("Looking ahead to 1985")', { timeout: 30_000 })
+  for (const field of LIKERT_FIELDS) {
+    // Click the label wrapping rating 4 (robust for controlled React radios — fires onChange).
+    await page.locator(`label:has(input[name="${field}"][value="4"])`).click()
+  }
+  await page.click('button:has-text("Submit")')
+  // The submit MUST navigate off the Likert screen (persisted). A silent validation bounce would
+  // leave the heading up → this times out loudly instead of masking a failed write.
+  await page.waitForSelector('h1:has-text("Looking ahead to 1985")', { state: 'detached', timeout: 15_000 })
+  log(pid, '↗ Looking-ahead Likert submitted')
 }
 
 // ── Phase 1b: hold → confirmation → attendance code → waiting room ──────────────
@@ -455,6 +510,37 @@ async function main() {
   const noShow = await driveSetup(await (await browser.newContext()).newPage(), NOSHOW_PID)
   log('setup', `no-show ${noShow.pid} (${noShow.role}) bootstrapped — will NOT attend`)
 
+  // ── Slice 7: pre-1978 KC is SHARED (4 graded MC + 1 reflection), graded denom 4, gate excluded ──
+  banner('Slice 7 — pre-1978 Knowledge Check (shared 4 MC + 1 reflection) + grading')
+  {
+    const baxPid = students.find(s => s.role === 'baxter').pid
+    const uniPid = students.find(s => s.role === 'union').pid
+    for (const [pid, role] of [[baxPid, 'baxter'], [uniPid, 'union']]) {
+      const { questions } = await stu('getStudentPrepQuestions', pid)
+      const gate   = questions.filter(q => q.category === 'knowledge_check' && q.system)
+      const kcMc   = questions.filter(q => q.category === 'knowledge_check' && !q.system && q.type === 'mc')
+      const refl   = questions.filter(q => q.category === 'preparation' && q.type === 'text')
+      const likert = questions.filter(q => q.type === 'likert')
+      assert(gate.length === 1,   `KC — ${role} sees exactly ONE role-gate question (ungraded, required)`)
+      assert(kcMc.length === 4,   `KC — ${role} sees 4 graded MC (shared, role_target:all)`)
+      assert(refl.length === 1,   `KC — ${role} sees 1 ungraded reflection (before 1978)`)
+      assert(likert.length === 0, `KC — ${role} sees NO Likert before 1978 (debrief excluded from prep)`)
+      assert(kcMc.every(q => q.correct_value == null), `KC — ${role} answer keys are stripped from the student payload`)
+    }
+    // Shared: both roles get the IDENTICAL non-system field set (role_target:all).
+    const fieldsFor = async pid => (await stu('getStudentPrepQuestions', pid)).questions.filter(q => !q.system).map(q => q.field).sort()
+    const bF = await fieldsFor(baxPid), uF = await fieldsFor(uniPid)
+    assert(JSON.stringify(bF) === JSON.stringify(uF), 'KC — Baxter and Union get the IDENTICAL shared question set (role_target:all)')
+
+    // Grading: KC_WRONG_PID answered Q1 wrong → 3/4 = 0.75; a fully-correct student → 1.0.
+    // 0.75 (not 0.8) proves denominator = 4 — the ungraded role gate is NOT counted.
+    const wrongScore = numVal((await readParticipantFields(KC_WRONG_PID)).knowledge_check_score)
+    const rightPid   = students.find(s => s.pid !== KC_WRONG_PID).pid
+    const rightScore = numVal((await readParticipantFields(rightPid)).knowledge_check_score)
+    assert(wrongScore === 0.75, `KC grading — one wrong of four → 0.75 (denominator 4, gate excluded) [${KC_WRONG_PID}=${wrongScore}]`)
+    assert(rightScore === 1,    `KC grading — all four correct → 1.0 [${rightPid}=${rightScore}]`)
+  }
+
   // 2. Instructor generates the 1978 attendance code; students confirm to the waiting room.
   const { code } = await inst('generateAttendanceCode')
   log('instr', `1978 attendance code: ${code}`)
@@ -476,6 +562,29 @@ async function main() {
 
   // 4. 1978 negotiation → 2 ratified dealers (A,B), 1 rejecter (C), 1 failed-ratify dealer (D).
   const { ratifiedGids, failRatifyGid, rejectGid, dealerMemberPids } = await drive1978Negotiation(students)
+
+  // ── Slice 7: between-rounds "Looking ahead to 1985" Likert set (after 1978, before 1983) ──
+  banner('Slice 7 — Looking-ahead Likert (after 1978, before 1983)')
+  {
+    const baxPid = students.find(s => s.role === 'baxter').pid
+    const uniPid = students.find(s => s.role === 'union').pid
+    for (const [pid, role] of [[baxPid, 'baxter'], [uniPid, 'union']]) {
+      const { questions } = await stu('getDebriefQuestions', pid)
+      const likert = questions.filter(q => q.type === 'likert')
+      assert(likert.length === 3, `Likert — ${role} gets 3 debrief Likert items (shared)`)
+      assert(likert.every(q => q.format === 'likert' && q.correct_value == null && q.grading == null),
+        `Likert — ${role} items are UNGRADED (no correct_value / no grading)`)
+      assert(likert.every(q => (q.options?.length ?? 0) === 7), `Likert — ${role} items are 1–7 scales`)
+    }
+  }
+  // Render + submit in-browser — proves placement AFTER 1978 and BEFORE the class advances to 1983.
+  await Promise.all(students.map(s => driveLookingAhead(s)))
+  assert(true, 'Likert — all 16 students saw "Looking ahead to 1985" after 1978 and submitted BEFORE Open Round 2')
+  {
+    const f = await readParticipantFields(students[0].pid)
+    assert(f.looking_ahead_submitted_at != null, 'Likert — response persisted (looking_ahead_submitted_at set)')
+    assert(LIKERT_FIELDS.every(field => strVal(f[field]) === '4'), 'Likert — all three ratings stored on the participant doc')
+  }
 
   // 5. Score & Record → RATIFIED dealers score Baxter 85 / Union 62 (their negotiated score stands).
   //    Both no-deal groups (C reject + D failed-ratification) score the 1978 NO-DEAL: Baxter =
