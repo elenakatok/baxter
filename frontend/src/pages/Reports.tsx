@@ -15,7 +15,14 @@ import {
 } from '@mygames/game-ui'
 import { SurplusScatterSVG, type ScatterPoint } from '../components/SurplusScatterSVG'
 import { SchemaField, parseForm, type FormValues } from '../phases/OutcomeReporting'
-import { baxterSchema, FIELD_LABELS, OPTION_LABELS, type OutcomeSchema } from '../gameConfig'
+import {
+  baxterSchema,
+  baxter1985Schema,
+  FIELD_LABELS,
+  OPTION_LABELS,
+  labelForOption,
+  type OutcomeSchema,
+} from '../gameConfig'
 
 // ── 1978 scoring scheme (class-level; entered via the report-grid tile) ─────────
 // Issues + options are exactly the six enum fields of the 1978 outcome contract.
@@ -23,11 +30,22 @@ const ISSUES_1978 = baxterSchema.filter(
   (f): f is { key: string; type: 'enum'; options: string[] } => f.type === 'enum',
 )
 const TOTAL_OPTIONS = ISSUES_1978.reduce((a, i) => a + i.options.length, 0)
+// The five discrete 1985 issues (the wage is rendered as its own money column).
+const ISSUES_1985 = baxter1985Schema.filter(
+  (f): f is { key: string; type: 'enum'; options: string[] } => f.type === 'enum',
+)
 
 const ROLE_COLS: { key: 'baxter' | 'union'; label: string }[] = [
   { key: 'baxter', label: 'Baxter Management' },
   { key: 'union',  label: 'Local 190' },
 ]
+
+// Baxter role display labels (NOT Winemaster/Home Base).
+const ROLE_LABELS: Record<string, string> = {
+  baxter: 'Baxter Management',
+  union:  'Local 190',
+}
+const roleLabel = (role: string) => ROLE_LABELS[role] ?? role
 
 type Scheme1978 = {
   baxter?: { optionScores?: Record<string, Record<string, number>> }
@@ -75,13 +93,9 @@ function enteredCount(scheme: Scheme1978, role: 'baxter' | 'union'): number {
   return Object.values(os).reduce((a, m) => a + Object.keys(m).length, 0)
 }
 
-// Pareto frontier endpoints (already in MILLIONS; x = WineMaster, y = Home Base) — from the target image.
-const WM_FRONTIER: { x: number; y: number }[] = [
-  { x: 2.99, y: 0.02 },  // WineMaster-favorable
-  { x: 0.01, y: 2.53 },  // HomeBase-favorable
-]
-
 // ── Types ─────────────────────────────────────────────────────────────────────
+
+type Arb1983 = { side: 'baxter' | 'union'; wage: number } | null
 
 type ReportRow = {
   participant_id: string
@@ -89,108 +103,156 @@ type ReportRow = {
   group_number: number | null
   group_id: string | null
   role: string
-  shares: number | null
-  vesting: string | null
-  board_seat: boolean | null
-  liability: number | null
-  value_or_cost: number | null
   raw_score: number | null
   text_answers: Record<string, string>
+  // 1978
+  outcome_1978: Record<string, unknown> | null
+  agreement_1978: boolean
+  wage_1978: number
+  score_1978: number | null
   notes: string | null
+  // 1983
+  wage_1983: number | null
+  arb_1983: Arb1983
+  score_1983: number | null
+  // 1985
+  outcome_1985: Record<string, unknown> | null
+  score_1985: number | null
+  total_score: number | null
 }
 
 type QuestionMeta = { field: string; prompt: string; role_target: string }
 
-// ── Vesting sort order ────────────────────────────────────────────────────────
+// ── Formatting helpers ─────────────────────────────────────────────────────────
 
-const VESTING_ORDER: Record<string, number> = {
-  'Immediate': 0,
-  'Pro Rata': 1,
-  'End of Second Year': 2,
+const money = (n: number | null | undefined): string =>
+  typeof n === 'number' && Number.isFinite(n) ? `$${n.toFixed(2)}` : '—'
+
+const fmtScore = (n: number | null | undefined): string =>
+  typeof n === 'number' && Number.isFinite(n)
+    ? n.toLocaleString('en-US', { maximumFractionDigits: 2 })
+    : '—'
+
+const optCell = (row: ReportRow, key: string): string => {
+  const o = row.outcome_1978
+  return o && o[key] != null ? labelForOption(key, o[key]) : '—'
+}
+const opt1985Cell = (row: ReportRow, key: string): string => {
+  const o = row.outcome_1985
+  return o && o[key] != null ? labelForOption(key, o[key]) : '—'
+}
+const num = (n: number | null): number => (typeof n === 'number' && Number.isFinite(n) ? n : -Infinity)
+
+// ── Shared leading columns (Name / Group # / Role) ──────────────────────────────
+
+const nameCol = (): SortableColumn<ReportRow, string> => ({
+  key: 'name', label: 'Name', headerStyle: { minWidth: 140 }, sticky: 'left',
+  render: r => r.display_name,
+  compare: (a, b) => a.display_name.localeCompare(b.display_name),
+})
+const groupCol = (): SortableColumn<ReportRow, string> => ({
+  key: 'group', label: 'Group #',
+  render: r => r.group_number ?? '—',
+  compare: (a, b) => (a.group_number ?? Infinity) - (b.group_number ?? Infinity),
+})
+const roleCol = (): SortableColumn<ReportRow, string> => ({
+  key: 'role', label: 'Role',
+  render: r => roleLabel(r.role),
+  compare: (a, b) => a.role.localeCompare(b.role),
+})
+const numCell = (n: number | null | undefined) =>
+  <span style={{ fontVariantNumeric: 'tabular-nums' }}>{fmtScore(n ?? null)}</span>
+
+// ── 1978 report columns (six issues + wage + raw score + notes) ────────────────
+function columns1978(onEdit: (r: ReportRow) => void, canEdit: boolean): SortableColumn<ReportRow, string>[] {
+  return [
+    nameCol(), groupCol(), roleCol(),
+    ...ISSUES_1978.map(issue => ({
+      key: `i_${issue.key}`, label: FIELD_LABELS[issue.key] ?? issue.key,
+      render: (r: ReportRow) => optCell(r, issue.key),
+      compare: (a: ReportRow, b: ReportRow) => optCell(a, issue.key).localeCompare(optCell(b, issue.key)),
+    } satisfies SortableColumn<ReportRow, string>)),
+    {
+      key: 'wage78', label: 'Wage',
+      render: r => <span style={{ fontVariantNumeric: 'tabular-nums' }}>{money(r.wage_1978)}</span>,
+      compare: (a, b) => a.wage_1978 - b.wage_1978,
+    },
+    {
+      key: 'score78', label: 'Raw score', nullsLast: true, isNull: r => r.score_1978 == null,
+      render: r => numCell(r.score_1978),
+      compare: (a, b) => num(a.score_1978) - num(b.score_1978),
+    },
+    {
+      key: 'notes78', label: 'Notes',
+      render: r => r.agreement_1978 ? 'Deal' : 'No deal',
+      compare: (a, b) => Number(a.agreement_1978) - Number(b.agreement_1978),
+    },
+    {
+      key: 'edit', label: '', headerStyle: { cursor: 'default' }, sticky: 'right',
+      render: r => (
+        <button
+          onClick={() => onEdit(r)}
+          disabled={!r.group_id || !canEdit}
+          style={{ background: 'none', border: '1px solid #ccc', borderRadius: 4, padding: '0.2rem 0.6rem', cursor: 'pointer', fontSize: '0.8rem' }}
+        >
+          Edit
+        </button>
+      ),
+      compare: () => 0,
+    },
+  ]
 }
 
-const vestingRank = (v: string | null) => v == null ? Infinity : (VESTING_ORDER[v] ?? 3)
-
-// ── Contract-outcome table columns ───────────────────────────────────────────
-
-type SortKey = 'name' | 'group' | 'role' | 'shares' | 'vesting' | 'board_seat' | 'liability' | 'value_or_cost' | 'raw_score' | 'notes' | 'edit'
-
-const ROLE_LABELS: Record<string, string> = {
-  winemaster: 'Winemaster',
-  home_base:  'Home Base',
-}
-
-function fmt(n: number | null): string {
-  return n == null ? '—' : n.toLocaleString('en-US')
-}
-
-function fmtSigned(n: number | null): string {
-  if (n == null) return '—'
-  return (n >= 0 ? '+' : '−') + Math.abs(n).toLocaleString('en-US')
-}
-
-const COLUMNS: readonly SortableColumn<ReportRow, SortKey>[] = [
+// ── 1983 report columns (1983 wage + adjusted score) ───────────────────────────
+const columns1983: SortableColumn<ReportRow, string>[] = [
+  nameCol(), groupCol(), roleCol(),
   {
-    key: 'name', label: 'Name', headerStyle: { minWidth: 140 }, sticky: 'left',
-    render: r => r.display_name,
-    compare: (a, b) => a.display_name.localeCompare(b.display_name),
+    key: 'wage83', label: '1983 Wage',
+    render: r => r.wage_1983 == null
+      ? '—'
+      : <span style={{ fontVariantNumeric: 'tabular-nums' }}>
+          {money(r.wage_1983)}{r.arb_1983 ? <span style={{ color: '#94a3b8', fontSize: '0.8rem' }}> (arbitrated)</span> : null}
+        </span>,
+    compare: (a, b) => num(a.wage_1983) - num(b.wage_1983),
   },
   {
-    key: 'group', label: 'Group #',
-    render: r => r.group_number ?? '—',
-    compare: (a, b) => (a.group_number ?? Infinity) - (b.group_number ?? Infinity),
-  },
-  {
-    key: 'role', label: 'Role',
-    render: r => r.role === 'winemaster' ? 'Winemaster' : 'Home Base',
-    compare: (a, b) => a.role.localeCompare(b.role),
-  },
-  {
-    key: 'shares', label: 'Shares', nullsLast: true, isNull: r => r.shares === null,
-    tiebreak: (a, b) => a.display_name.localeCompare(b.display_name),
-    render: r => <span style={{ fontVariantNumeric: 'tabular-nums' }}>{fmt(r.shares)}</span>,
-    compare: (a, b) => (a.shares ?? 0) - (b.shares ?? 0),
-  },
-  {
-    key: 'vesting', label: 'Vesting', nullsLast: true, isNull: r => r.vesting === null,
-    tiebreak: (a, b) => a.display_name.localeCompare(b.display_name),
-    render: r => r.vesting ?? '—',
-    compare: (a, b) => vestingRank(a.vesting) - vestingRank(b.vesting),
-  },
-  {
-    key: 'board_seat', label: 'Board seat', nullsLast: true, isNull: r => r.board_seat === null,
-    tiebreak: (a, b) => a.display_name.localeCompare(b.display_name),
-    render: r => r.board_seat === null ? '—' : r.board_seat ? 'Yes' : 'No',
-    compare: (a, b) => (a.board_seat ? 1 : 0) - (b.board_seat ? 1 : 0),
-  },
-  {
-    key: 'liability', label: 'Liability', nullsLast: true, isNull: r => r.liability === null,
-    tiebreak: (a, b) => a.display_name.localeCompare(b.display_name),
-    render: r => <span style={{ fontVariantNumeric: 'tabular-nums' }}>{fmt(r.liability)}</span>,
-    compare: (a, b) => (a.liability ?? 0) - (b.liability ?? 0),
-  },
-  {
-    key: 'value_or_cost', label: 'Value / Cost', nullsLast: true, isNull: r => r.value_or_cost === null,
-    tiebreak: (a, b) => a.display_name.localeCompare(b.display_name),
-    render: r => <span style={{ fontVariantNumeric: 'tabular-nums' }}>{fmt(r.value_or_cost)}</span>,
-    compare: (a, b) => (a.value_or_cost ?? 0) - (b.value_or_cost ?? 0),
-  },
-  {
-    key: 'raw_score', label: 'Raw score', nullsLast: true, isNull: r => r.raw_score === null,
-    tiebreak: (a, b) => a.display_name.localeCompare(b.display_name),
-    render: r => <span style={{ fontVariantNumeric: 'tabular-nums' }}>{fmtSigned(r.raw_score)}</span>,
-    compare: (a, b) => (a.raw_score ?? 0) - (b.raw_score ?? 0),
-  },
-  {
-    key: 'notes', label: 'Notes', headerStyle: { minWidth: 80 },
-    nullsLast: true, isNull: r => !r.notes || !r.notes.trim(),
-    tiebreak: (a, b) => a.display_name.localeCompare(b.display_name),
-    render: r => (r.notes && r.notes.trim())
-      ? <span style={{ whiteSpace: 'pre-wrap', display: 'inline-block', maxWidth: 220, overflowWrap: 'anywhere' }}>{r.notes}</span>
-      : '—',
-    compare: (a, b) => (a.notes ?? '').localeCompare(b.notes ?? ''),
+    key: 'score83', label: 'Adjusted score', nullsLast: true, isNull: r => r.score_1983 == null,
+    render: r => numCell(r.score_1983),
+    compare: (a, b) => num(a.score_1983) - num(b.score_1983),
   },
 ]
+
+// ── 1985 report columns (six 1985 issues + carried-in 1983 + 1985 + TOTAL) ─────
+const columns1985: SortableColumn<ReportRow, string>[] = [
+  nameCol(), groupCol(), roleCol(),
+  {
+    key: 'wage85', label: FIELD_LABELS['wage85'] ?? 'Hourly wage ($)',
+    render: r => <span style={{ fontVariantNumeric: 'tabular-nums' }}>{r.outcome_1985 ? money(r.outcome_1985['wage85'] as number) : '—'}</span>,
+    compare: (a, b) => num((a.outcome_1985?.['wage85'] as number) ?? null) - num((b.outcome_1985?.['wage85'] as number) ?? null),
+  },
+  ...ISSUES_1985.map(issue => ({
+    key: `j_${issue.key}`, label: FIELD_LABELS[issue.key] ?? issue.key,
+    render: (r: ReportRow) => opt1985Cell(r, issue.key),
+    compare: (a: ReportRow, b: ReportRow) => opt1985Cell(a, issue.key).localeCompare(opt1985Cell(b, issue.key)),
+  } satisfies SortableColumn<ReportRow, string>)),
+  {
+    key: 'carry83', label: '1983 score (carried in)', nullsLast: true, isNull: r => r.score_1983 == null,
+    render: r => numCell(r.score_1983),
+    compare: (a, b) => num(a.score_1983) - num(b.score_1983),
+  },
+  {
+    key: 'score85', label: '1985 score', nullsLast: true, isNull: r => r.score_1985 == null,
+    render: r => numCell(r.score_1985),
+    compare: (a, b) => num(a.score_1985) - num(b.score_1985),
+  },
+  {
+    key: 'total', label: 'TOTAL score', nullsLast: true, isNull: r => r.total_score == null,
+    render: r => <strong style={{ fontVariantNumeric: 'tabular-nums' }}>{fmtScore(r.total_score)}</strong>,
+    compare: (a, b) => num(a.total_score) - num(b.total_score),
+  },
+]
+
+type ReportKind = '1978' | '1983' | '1985'
 
 // ── Page component ────────────────────────────────────────────────────────────
 
@@ -307,8 +369,8 @@ export default function Reports() {
     }
   }
 
-  // ── Inline group-contract editor (report-only: writes the group contract and
-  //    recomputes each member's raw_score via updateGroupContract; never z-scores) ──
+  // ── Inline group-contract editor (report-only: edits the 1978 six-issue contract and
+  //    recomputes each member's 1978 raw_score via updateGroupContract; never z-scores) ──
   const [editing,    setEditing]    = useState<{ groupId: string; groupNumber: number | null } | null>(null)
   const [formValues, setFormValues] = useState<FormValues>({})
   const [dealReached, setDealReached] = useState(true)
@@ -317,15 +379,16 @@ export default function Reports() {
 
   const openEditor = (row: ReportRow) => {
     if (!row.group_id || !schema) return
-    // A deal is present iff any non-text contract field has a value (no-deal → all null).
-    const hasDeal = schema.some(f => f.type !== 'text' && (row as Record<string, unknown>)[f.key] != null)
+    // The 1978 contract values are carried on the row (outcome_1978) — bind the form from THEM so
+    // the selects show and submit the real agreed options (Part A).
+    const o = row.outcome_1978 ?? {}
     const vals: FormValues = {}
     for (const f of schema) {
-      const raw = (row as Record<string, unknown>)[f.key]
+      const raw = (o as Record<string, unknown>)[f.key]
       vals[f.key] = f.type === 'boolean' ? Boolean(raw) : (raw == null ? '' : String(raw))
     }
     setFormValues(vals)
-    setDealReached(hasDeal)
+    setDealReached(row.agreement_1978)
     setEditError(null)
     setEditing({ groupId: row.group_id, groupNumber: row.group_number })
   }
@@ -346,9 +409,9 @@ export default function Reports() {
         { ok: boolean; rows: ReportRow[] }
       >(functions, 'updateGroupContract')
       const res = await fn({ groupId: editing.groupId, agreement_reached: dealReached, outcome })
-      const updated = res.data.rows
-      // Refresh the whole group's rows at once; other groups untouched.
-      setRows(prev => prev ? prev.map(r => updated.find(u => u.participant_id === r.participant_id) ?? r) : prev)
+      // The server rebuilds the FULL row set (cross-group 1978 no-deal base can shift), so replace
+      // wholesale rather than merging by participant.
+      setRows(res.data.rows)
       setEditing(null)
     } catch (err) {
       setEditError(err instanceof Error ? err.message : 'Failed to save contract.')
@@ -357,27 +420,29 @@ export default function Reports() {
     }
   }
 
-  // ── Scatter data — derived from rows, no extra fetch ───────────────────────
+  // ── Scatter data — total score per role, one point per group ────────────────
   const scatterSvgRef = useRef<SVGSVGElement>(null)
 
   const scatterPoints: ScatterPoint[] = (() => {
     if (!rows) return []
-    const groupMap = new Map<number, { wm: number | null; hb: number | null }>()
+    const groupMap = new Map<number, { baxter: number | null; union: number | null }>()
     for (const r of rows) {
-      if (r.group_number == null || r.raw_score == null) continue
-      const entry = groupMap.get(r.group_number) ?? { wm: null, hb: null }
-      if (r.role === 'winemaster') entry.wm = entry.wm ?? r.raw_score
-      else if (r.role === 'home_base') entry.hb = entry.hb ?? r.raw_score
+      if (r.group_number == null) continue
+      const score = r.total_score ?? r.raw_score
+      if (score == null) continue
+      const entry = groupMap.get(r.group_number) ?? { baxter: null, union: null }
+      if (r.role === 'baxter') entry.baxter = entry.baxter ?? score
+      else if (r.role === 'union') entry.union = entry.union ?? score
       groupMap.set(r.group_number, entry)
     }
     return Array.from(groupMap.entries())
-      .filter(([, s]) => s.wm !== null && s.hb !== null)
-      .map(([n, s]) => ({ x: s.wm!, y: s.hb!, label: `G${n}` }))
+      .filter(([, s]) => s.baxter !== null && s.union !== null)
+      .map(([n, s]) => ({ x: s.baxter!, y: s.union!, label: `G${n}` }))
       .sort((a, b) => a.label.localeCompare(b.label))
   })()
 
   // ── Modal state ────────────────────────────────────────────────────────────
-  const [contractOpen,  setContractOpen]  = useState(false)
+  const [activeReport, setActiveReport] = useState<ReportKind | null>(null)
   const [activeExport,  setActiveExport]  = useState<{ title: string; text: string } | null>(null)
 
   // ── Tile config ────────────────────────────────────────────────────────────
@@ -388,12 +453,17 @@ export default function Reports() {
     const svgHtml = scatterSvgRef.current.outerHTML
     const win = window.open('', 'surplus-scatter', 'width=960,height=600')
     if (!win) return
-    win.document.write(`<!DOCTYPE html><html><head><title>Surplus Scatter</title></head><body style="margin:0;padding:1rem;background:#fff;">${svgHtml}</body></html>`)
+    win.document.write(`<!DOCTYPE html><html><head><title>Score Scatter</title></head><body style="margin:0;padding:1rem;background:#fff;">${svgHtml}</body></html>`)
     win.document.close()
   }
 
   const baxterEntered = enteredCount(scheme1978, 'baxter')
   const unionEntered  = enteredCount(scheme1978, 'union')
+
+  const reportPreview = (kind: ReportKind) =>
+    rows == null
+      ? <span style={{ color: '#888', fontSize: '0.85rem' }}>{loading ? 'Loading…' : 'No data'}</span>
+      : <span style={{ fontSize: '0.9rem', color: '#555' }}>{finalized} participant{finalized !== 1 ? 's' : ''} · {kind}</span>
 
   const tiles: ReportTileConfig[] = [
     {
@@ -409,29 +479,32 @@ export default function Reports() {
       actionLabel: (baxterEntered || unionEntered) ? 'Edit ↗' : 'Enter ↗',
     },
     {
-      id: 'contract-outcomes',
-      title: 'Contract Outcomes — per participant',
-      preview: rows == null
-        ? <span style={{ color: '#888', fontSize: '0.85rem' }}>{loading ? 'Loading…' : 'No data'}</span>
-        : <span style={{ fontSize: '0.9rem', color: '#555' }}>
-            {finalized} participant{finalized !== 1 ? 's' : ''} finalized
-          </span>,
-      onOpen: () => setContractOpen(true),
-      disabled: !rows || rows.length === 0,
-      actionLabel: 'Open ↗',
+      id: 'report-1978', title: '1978 Report', preview: reportPreview('1978'),
+      onOpen: () => setActiveReport('1978'),
+      disabled: !rows || rows.length === 0, actionLabel: 'Open ↗',
     },
     {
-      id: 'surplus-scatter',
-      title: 'Surplus Scatter — WM vs. HB',
-      preview: <SurplusScatterSVG points={scatterPoints} frontier={WM_FRONTIER} svgRef={scatterSvgRef} />,
+      id: 'report-1983', title: '1983 Report', preview: reportPreview('1983'),
+      onOpen: () => setActiveReport('1983'),
+      disabled: !rows || rows.length === 0, actionLabel: 'Open ↗',
+    },
+    {
+      id: 'report-1985', title: '1985 Report', preview: reportPreview('1985'),
+      onOpen: () => setActiveReport('1985'),
+      disabled: !rows || rows.length === 0, actionLabel: 'Open ↗',
+    },
+    {
+      id: 'score-scatter',
+      title: 'Score Scatter — Baxter vs. Local 190',
+      preview: <SurplusScatterSVG points={scatterPoints} svgRef={scatterSvgRef} />,
       onOpen: projectScatter,
       disabled: scatterPoints.length === 0,
       actionLabel: 'Project ↗',
     },
-    // One tile per text question (6 total: 3 WM + 3 HB).
+    // One tile per text question (6 total: 3 Baxter + 3 Union).
     ...questions.map(q => {
-      const roleLabel = ROLE_LABELS[q.role_target] ?? q.role_target
-      const tileTitle = `${roleLabel}: ${q.prompt}`
+      const rLabel = ROLE_LABELS[q.role_target] ?? q.role_target
+      const tileTitle = `${rLabel}: ${q.prompt}`
       const qRows: AiTextRow[] = (rows ?? [])
         .filter(r => r.role === q.role_target && r.text_answers[q.field])
         .map(r => ({ name: r.display_name, raw_score: r.raw_score, answer: r.text_answers[q.field] }))
@@ -450,6 +523,22 @@ export default function Reports() {
       } satisfies ReportTileConfig
     }),
   ]
+
+  // Columns + title for the active report modal.
+  const reportColumns =
+    activeReport === '1978' ? columns1978(openEditor, !!schema)
+    : activeReport === '1983' ? columns1983
+    : activeReport === '1985' ? columns1985
+    : []
+  const reportTitle =
+    activeReport === '1978' ? '1978 Report'
+    : activeReport === '1983' ? '1983 Report'
+    : activeReport === '1985' ? '1985 Report'
+    : ''
+  const reportSort =
+    activeReport === '1978' ? 'group'
+    : activeReport === '1983' ? 'group'
+    : 'total'
 
   // ── Render ─────────────────────────────────────────────────────────────────
   if (authError) {
@@ -479,10 +568,10 @@ export default function Reports() {
         <ReportBoard tiles={tiles} />
       </main>
 
-      {/* ── Contract outcomes modal ── */}
-      {contractOpen && (
+      {/* ── Per-round report modal (1978 / 1983 / 1985) ── */}
+      {activeReport && (
         <div
-          onClick={() => setContractOpen(false)}
+          onClick={() => setActiveReport(null)}
           style={{
             position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.45)',
             display: 'flex', alignItems: 'flex-start', justifyContent: 'center',
@@ -493,43 +582,26 @@ export default function Reports() {
             onClick={e => e.stopPropagation()}
             style={{
               background: '#fff', borderRadius: 8, boxShadow: '0 8px 32px rgba(0,0,0,0.25)',
-              // Viewport-bounded so the wide table scrolls INSIDE the modal instead of
-              // stretching it: minWidth:0 lets the flex item shrink below content width.
-              width: '100%', maxWidth: 'min(1100px, calc(100vw - 2rem))', minWidth: 0,
+              width: '100%', maxWidth: 'min(1200px, calc(100vw - 2rem))', minWidth: 0,
               boxSizing: 'border-box', maxHeight: 'calc(100vh - 6rem)', overflowY: 'auto',
               padding: '1.25rem 1.5rem',
             }}
           >
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem' }}>
-              <h3 style={{ margin: 0, fontSize: '1rem', fontWeight: 600 }}>Contract Outcomes — per participant</h3>
+              <h3 style={{ margin: 0, fontSize: '1rem', fontWeight: 600 }}>{reportTitle}</h3>
               <button
-                onClick={() => setContractOpen(false)}
+                onClick={() => setActiveReport(null)}
                 style={{ background: 'none', border: 'none', fontSize: '1.25rem', cursor: 'pointer', color: '#666' }}
               >
                 ✕
               </button>
             </div>
             <div style={{ overflow: 'auto', maxHeight: 'calc(100vh - 14rem)', border: '1px solid #ddd', borderRadius: 6 }}>
-              <SortableTable<ReportRow, SortKey>
+              <SortableTable<ReportRow, string>
                 rows={rows ?? []}
-                columns={[
-                  ...COLUMNS,
-                  {
-                    key: 'edit', label: '', headerStyle: { cursor: 'default' }, sticky: 'right',
-                    render: r => (
-                      <button
-                        onClick={() => openEditor(r)}
-                        disabled={!r.group_id || !schema}
-                        style={{ background: 'none', border: '1px solid #ccc', borderRadius: 4, padding: '0.2rem 0.6rem', cursor: 'pointer', fontSize: '0.8rem' }}
-                      >
-                        Edit
-                      </button>
-                    ),
-                    compare: () => 0,
-                  },
-                ]}
+                columns={reportColumns}
                 getRowKey={r => r.participant_id}
-                initialSortKey="group"
+                initialSortKey={reportSort}
                 roleLabels={ROLE_LABELS}
                 getRowRole={r => r.role}
                 emptyMessage="No finalized participants yet."
@@ -540,14 +612,14 @@ export default function Reports() {
         </div>
       )}
 
-      {/* ── Inline group-contract editor ── */}
+      {/* ── Inline 1978 group-contract editor ── */}
       {editing && schema && (
         <div
           onClick={() => !saving && setEditing(null)}
           style={{
             position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)',
             display: 'flex', alignItems: 'flex-start', justifyContent: 'center',
-            padding: '3rem 1rem', zIndex: 1100, overflowY: 'auto',
+            padding: '3rem 1rem', zIndex: 1200, overflowY: 'auto',
           }}
         >
           <div
@@ -605,7 +677,7 @@ export default function Reports() {
           style={{
             position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)',
             display: 'flex', alignItems: 'flex-start', justifyContent: 'center',
-            padding: '3rem 1rem', zIndex: 1100, overflowY: 'auto',
+            padding: '3rem 1rem', zIndex: 1200, overflowY: 'auto',
           }}
         >
           <div

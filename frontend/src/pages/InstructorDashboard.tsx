@@ -62,6 +62,8 @@ function useBaxterInstance(): BaxterInstanceState {
 
 type ArbGroup = {
   id: string
+  /** 1-based display number (sorted by doc id) — matches the group numbers used elsewhere. */
+  group_number: number
   status: string
   wage83: number | null
   w78: number | null
@@ -79,6 +81,10 @@ function useBaxterGroups(): ArbGroup[] {
       unsub = onSnapshot(
         collection(db, 'game_instances', gameInstanceId, 'groups'),
         (snap) => {
+          // Stable 1-based group numbers by sorted doc id (matches getReportData / the reports).
+          const numberById = new Map<string, number>(
+            snap.docs.slice().sort((a, b) => a.id.localeCompare(b.id)).map((g, i) => [g.id, i + 1]),
+          )
           setGroups(snap.docs.map((g) => {
             const d = g.data() as Record<string, unknown>
             const o1983 = (d['outcomes_by_round'] as Record<string, unknown> | undefined)?.['1983'] as Record<string, unknown> | null | undefined
@@ -87,6 +93,7 @@ function useBaxterGroups(): ArbGroup[] {
             const arb = d['arbitration_1983'] as { side: 'baxter' | 'union'; wage: number } | undefined
             return {
               id: g.id,
+              group_number: numberById.get(g.id) ?? 0,
               status: (d['status'] as string) ?? 'unknown',
               wage83: typeof w83 === 'number' ? w83 : null,
               w78: typeof wagesOpt === 'string' ? (WAGE_DOLLARS[wagesOpt] ?? null) : null,
@@ -172,8 +179,8 @@ function BaxterArbitrationQueue() {
       {flagged.length === 0 && <span style={hintStyle}>No groups awaiting arbitration.</span>}
       {flagged.map(g => (
         <div key={g.id} style={arbRowStyle}>
-          <span style={{ fontFamily: 'monospace' }}>{g.id}</span>
-          <span style={hintStyle}>1978 wage {g.w78 != null ? `$${g.w78.toFixed(2)}` : '—'}</span>
+          <span style={{ fontWeight: 600 }}>Group {g.group_number}</span>
+          <span style={hintStyle}>1978 wage {g.w78 != null ? `$${g.w78.toFixed(2)}` : '$10.69'}</span>
           <button onClick={() => handleResolve(g.id)} disabled={busy != null} style={{ padding: '0.3rem 0.8rem' }}>
             {busy === g.id ? 'Resolving…' : 'Resolve arbitration'}
           </button>
@@ -187,7 +194,7 @@ function BaxterArbitrationQueue() {
       ))}
       {recentlyResolved.map(g => (
         <div key={g.id} style={arbRowStyle}>
-          <span style={{ fontFamily: 'monospace' }}>{g.id}</span>
+          <span style={{ fontWeight: 600 }}>Group {g.group_number}</span>
           <span style={{ color: '#57606a', fontSize: '0.85rem' }}>
             resolved: {g.arbitration!.side === 'baxter' ? 'Baxter rules' : 'Union rules'} → ${g.arbitration!.wage.toFixed(2)}
           </span>

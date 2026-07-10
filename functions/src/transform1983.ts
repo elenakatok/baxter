@@ -27,6 +27,21 @@ export const WAGE_DOLLARS: Readonly<Record<string, number>> = {
 /** Arbitration wage when Baxter's rules win (avg of the three highest-paid industry leaders). */
 export const ARBITRATION_BAXTER_WAGE = 8.67
 
+/**
+ * The 1978 status-quo ("Current") wage — $10.69. A group that reaches NO 1978 deal keeps the
+ * current contract, so its recorded 1978 wage is this status-quo figure (spec / Elena-decided).
+ * This is a DISPLAY / arbitration-reference wage only — it does NOT change the 1978 no-deal SCORE
+ * (Baxter min+5/50, Union 0), which is computed independently of the wage. `wage78FromOutcome`
+ * (frozen-gate function) is deliberately left returning null on no-deal; consumers that need the
+ * status-quo fallback use `wage78OrStatusQuo`.
+ */
+export const STATUS_QUO_WAGE_1978 = WAGE_DOLLARS.current  // 10.69
+
+/** The group's 1978 wage with the no-deal status-quo fallback ($10.69). Never null. */
+export function wage78OrStatusQuo(outcome: Record<string, unknown> | null | undefined): number {
+  return wage78FromOutcome(outcome) ?? STATUS_QUO_WAGE_1978
+}
+
 /** Field key holding the continuous 1983 wage inside the round-2 outcome object. */
 export const WAGE83_FIELD = 'wage83'
 

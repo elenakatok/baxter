@@ -5,15 +5,13 @@ const SM = { top: 68, left: 108, right: 50, bottom: 92 }
 const SPW = SW - SM.left - SM.right  // 742
 const SPH = SH - SM.top - SM.bottom  // 380
 
-const TO_M = 1_000_000  // raw scores are stored in dollars; the plot draws in millions.
-
 export interface ScatterPoint {
-  x: number  // WineMaster raw score (dollars; converted to millions at plot boundary)
-  y: number  // Home Base raw score (dollars; converted to millions at plot boundary)
+  x: number  // Baxter Management total score (raw, plotted as-is)
+  y: number  // Local 190 total score (raw, plotted as-is)
   label: string
 }
 
-/** Frontier endpoint — already in MILLIONS, x = WineMaster, y = Home Base. */
+/** Frontier endpoint (raw plot units) — x = Baxter Management, y = Local 190. Optional. */
 export interface FrontierPoint {
   x: number
   y: number
@@ -32,8 +30,8 @@ function niceTicks(min: number, max: number, count = 6): number[] {
   return ticks
 }
 
-// Plain decimal millions: 0, 0.5, 1, 2.5 … ($ millions lives in the axis titles, per the image).
-function fmtMillions(n: number): string {
+// Plain decimal tick labels (scores, not dollars): 0, 50, 100, 187.95 …
+function fmtNum(n: number): string {
   const r = Math.round(n * 100) / 100  // clean float-accumulation noise to 2dp
   if (r === 0) return '0'
   const sign = r < 0 ? '−' : ''
@@ -68,8 +66,8 @@ export function SurplusScatterSVG({
     )
   }
 
-  // Convert dots from dollars → millions at the plot boundary; frontier is already in millions.
-  const mpts = points.map(p => ({ ...p, x: p.x / TO_M, y: p.y / TO_M }))
+  // Plot raw score values as-is (no unit conversion); frontier (if any) is in the same units.
+  const mpts = points.map(p => ({ ...p }))
   const fr = frontier ?? []
 
   // Auto-scale over BOTH the dots and the frontier endpoints so the line isn't clipped.
@@ -110,10 +108,10 @@ export function SurplusScatterSVG({
 
       {/* Title */}
       <text x={SW / 2} y={28} textAnchor="middle" fontSize={20} fontWeight={700} fill="#111" fontFamily="sans-serif">
-        Surplus Scatter — Winemaster vs. Home Base
+        Total Score — Baxter Management vs. Local 190
       </text>
       <text x={SW / 2} y={50} textAnchor="middle" fontSize={12} fill="#6b7280" fontFamily="sans-serif">
-        One dot per group · positive = above reservation · negative = below reservation
+        One dot per group · total score per role
       </text>
 
       {/* Clip path */}
@@ -134,7 +132,7 @@ export function SurplusScatterSVG({
           <g key={t}>
             <line x1={SM.left} y1={y} x2={SM.left + SPW} y2={y} stroke="#e5e7eb" strokeWidth={1} />
             <text x={SM.left - 8} y={y + 4} textAnchor="end" fontSize={11} fill="#9ca3af" fontFamily="sans-serif">
-              {fmtMillions(t)}
+              {fmtNum(t)}
             </text>
           </g>
         )
@@ -148,7 +146,7 @@ export function SurplusScatterSVG({
           <g key={t}>
             <line x1={x} y1={SM.top} x2={x} y2={SM.top + SPH} stroke="#e5e7eb" strokeWidth={1} />
             <text x={x} y={SM.top + SPH + 17} textAnchor="middle" fontSize={11} fill="#6b7280" fontFamily="sans-serif">
-              {fmtMillions(t)}
+              {fmtNum(t)}
             </text>
           </g>
         )
@@ -195,21 +193,21 @@ export function SurplusScatterSVG({
       <line x1={SM.left} y1={SM.top} x2={SM.left} y2={SM.top + SPH} stroke="#374151" strokeWidth={2} />
       <line x1={SM.left} y1={SM.top + SPH} x2={SM.left + SPW} y2={SM.top + SPH} stroke="#374151" strokeWidth={2} />
 
-      {/* Y-axis title (rotated) — Home Base */}
+      {/* Y-axis title (rotated) — Local 190 */}
       <text
         x={SM.left - 82} y={SM.top + SPH / 2}
         transform={`rotate(-90, ${SM.left - 82}, ${SM.top + SPH / 2})`}
         textAnchor="middle" fontSize={13} fill="#374151" fontFamily="sans-serif"
       >
-        HomeBase net gain ($ millions)
+        Local 190 total score
       </text>
 
-      {/* X-axis title — WineMaster */}
+      {/* X-axis title — Baxter Management */}
       <text
         x={SM.left + SPW / 2} y={SM.top + SPH + 48}
         textAnchor="middle" fontSize={13} fill="#374151" fontFamily="sans-serif"
       >
-        WineMaster net gain ($ millions)
+        Baxter Management total score
       </text>
 
       {/* Data points + labels */}

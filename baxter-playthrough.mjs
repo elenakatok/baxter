@@ -297,6 +297,19 @@ async function pollGroupsFull(pred, maxMs = 30_000) {
   return readGroupsFull()
 }
 
+/** Firestore REST PATCH on a group doc (owner auth). `fields` is the REST document body; `mask`
+ *  is the updateMask.fieldPaths list — a masked path absent from `fields` is DELETED. Used by the
+ *  Part B arbitration probe to revert its write so the frozen class-average numbers stay intact. */
+async function fsPatchGroup(gid, fields, mask) {
+  const qs = mask.map(p => `updateMask.fieldPaths=${encodeURIComponent(p)}`).join('&')
+  const res = await fetch(`${FIRESTORE}/game_instances/${GID}/groups/${gid}?${qs}`, {
+    method: 'PATCH',
+    headers: { Authorization: 'Bearer owner', 'Content-Type': 'application/json' },
+    body: JSON.stringify({ fields }),
+  })
+  return res.ok
+}
+
 /** Map browser students → their group, tagging each with is_lead/role from Firestore. */
 function groupStudents(studs, parts) {
   const byPid = Object.fromEntries(parts.map(p => [p.id, p]))
@@ -362,6 +375,20 @@ async function driveSetup(page, pid) {
   await page.waitForSelector('h1:has-text("Preparation complete")', { timeout: 30_000 })
   log(pid, '◆ hold screen')
   return { page, pid, role }
+}
+
+// ── Part C: post-1978 reaffirm/debrief screen (Results) — shown FIRST, before the Likert ──
+// After 1978 completes, the student lands on the reaffirm/debrief screen ("Negotiation results")
+// with the group + agreed deal + the required free-text reflection. Submitting it advances to the
+// "Looking ahead to 1985" Likert set (proving the corrected order: reaffirm → Likert → all-done).
+async function driveReaffirm(s) {
+  const { page, pid } = s
+  await page.waitForSelector('h1:has-text("Negotiation results")', { timeout: 30_000 })
+  await page.locator('textarea').first().fill(`${pid}: the negotiation went as expected.`)
+  await page.click('button:has-text("Submit")')
+  // Must navigate off the reaffirm screen INTO the Likert — proves ordering + a persisted debrief.
+  await page.waitForSelector('h1:has-text("Looking ahead to 1985")', { timeout: 15_000 })
+  log(pid, '↗ reaffirm/debrief submitted → Likert')
 }
 
 // ── Between-rounds "Looking ahead to 1985" Likert set (after 1978, before 1983) ──
@@ -644,13 +671,32 @@ async function main() {
       assert(likert.every(q => (q.options?.length ?? 0) === 7), `Likert — ${role} items are 1–7 scales`)
     }
   }
-  // Render + submit in-browser — proves placement AFTER 1978 and BEFORE the class advances to 1983.
+  // ── Part C — post-1978 flow order: 1) reaffirm/debrief → 2) Likert → 3) all-done ──
+  banner('Part C — post-1978 flow order (reaffirm/debrief → Likert → all-done)')
+  // 1) REAFFIRM/DEBRIEF FIRST. Every student lands on "Negotiation results" and submits the
+  //    required reflection, which advances them into the Likert (proving reaffirm precedes Likert).
+  await Promise.all(students.map(s => driveReaffirm(s)))
+  assert(true, 'Part C — reaffirm/debrief screen (group + deal + reflection) shown FIRST, before the Likert')
+  {
+    const f = await readParticipantFields(students[0].pid)
+    assert(f.debrief_submitted_at != null, 'Part C — reaffirm/debrief persisted (debrief_submitted_at set) before the Likert')
+  }
+  // 2) THEN the Likert. Render + submit in-browser — proves it comes AFTER reaffirm and BEFORE 1983.
   await Promise.all(students.map(s => driveLookingAhead(s)))
-  assert(true, 'Likert — all 16 students saw "Looking ahead to 1985" after 1978 and submitted BEFORE Open Round 2')
+  assert(true, 'Part C — Likert ("Looking ahead to 1985") shown SECOND (after reaffirm/debrief) + submitted before Open Round 2')
   {
     const f = await readParticipantFields(students[0].pid)
     assert(f.looking_ahead_submitted_at != null, 'Likert — response persisted (looking_ahead_submitted_at set)')
     assert(LIKERT_FIELDS.every(field => strVal(f[field]) === '4'), 'Likert — all three ratings stored on the participant doc')
+  }
+  // 3) THEN the all-done screen, with the new "Part 2 … next class" line.
+  {
+    const s0 = students[0]
+    await s0.page.waitForSelector('h1:has-text("You\'re all done")', { timeout: 15_000 })
+    const body = (await s0.page.locator('main').innerText()).replace(/\s+/g, ' ')
+    assert(/Part 2 of this negotiation will take place during the next class/.test(body),
+      'Part C — all-done screen adds the "Part 2 … during the next class" line')
+    assert(/close this tab/i.test(body), 'Part C — all-done keeps the existing "you can close this tab" text')
   }
 
   // 5. Score & Record → RATIFIED dealers score Baxter 85 / Union 62 (their negotiated score stands).
@@ -835,6 +881,10 @@ async function main() {
   {
     const btnVisible = await dash.locator('button:has-text("Resolve arbitration")').isVisible().catch(() => false)
     assert(btnVisible, 'Arbitration — group B is AUTO-FLAGGED (Resolve button shown on the dashboard queue)')
+    // Part D — the queue row identifies the group by NUMBER ("Group N"), NOT the raw UUID.
+    const rowText = await dash.locator('div:has(> button:has-text("Resolve arbitration"))').first().innerText().catch(() => '')
+    assert(/Group\s+\d+/.test(rowText) && !rowText.includes(gidB),
+      `Part D — arbitration queue row shows the GROUP NUMBER, not the UUID [row="${rowText.replace(/\s+/g, ' ').trim()}"]`)
   }
   const arb = await inst('resolveArbitration', { group_id: gidB, seed: 1 })
   assert(arb.side === 'baxter' && near(arb.wage, 8.67),
@@ -939,6 +989,27 @@ async function main() {
     }
     await pollGroupsFull(g => [gidA, gidB, rejectGid, failRatifyGid].every(id => g.find(x => x.id === id)?.status === 'completed'), 30_000)
     log('1983', `groups C (${rejectGid}) + D (${failRatifyGid}) no-dealed 1983 → all four completed; ready to proceed`)
+  }
+
+  // ── Part B — a 1978-NO-DEAL group arbitrates 1983 with the $10.69 status-quo wage ──
+  // Group C reached NO 1978 deal (null outcome), so under Part B its 1978 wage is the status-quo
+  // $10.69: arbitration must NOT block on "resolve 1978 first", and the Union branch pays $10.69.
+  // We PROBE C's arbitration here (C is completed with no 1983 wage) with a Union-forcing seed,
+  // then REVERT its 1983 slot so the frozen A/B class-average transform numbers below are unaffected
+  // (C stays no-1983-wage into 1985, exactly as the existing assertions expect).
+  {
+    let arbC = null, blocked = null
+    try { arbC = await inst('resolveArbitration', { group_id: rejectGid, seed: 2 }) }  // seed 2 → Union branch
+    catch (e) { blocked = e instanceof Error ? e.message : String(e) }
+    assert(blocked === null,
+      `Part B — 1978-no-deal group arbitrates with NO "resolve 1978 first" block [${blocked ?? 'no block'}]`)
+    assert(arbC && arbC.side === 'union' && near(arbC.wage, 10.69),
+      `Part B — Union-branch arbitration pays the $10.69 status-quo 1978 wage [side=${arbC?.side} wage=${arbC?.wage}]`)
+    // Revert the probe write: clear outcomes_by_round (removes wage83) + delete arbitration_1983.
+    await fsPatchGroup(rejectGid, { outcomes_by_round: { mapValue: { fields: {} } } }, ['outcomes_by_round', 'arbitration_1983'])
+    const cAfter = (await readGroupsFull()).find(x => x.id === rejectGid)
+    assert(cAfter?.wage83 == null,
+      'Part B — arbitration probe reverted (C back to no 1983 wage; frozen class-average numbers intact)')
   }
 
   // Proceed 1983→1985 (same-session generic advanceRound: re-opens every group; day-2 presence
@@ -1121,6 +1192,117 @@ async function main() {
       'Terminal push — payload carries the REAL z-scored normalized_score (matches stored), status completed')
   }
   await cb.close()
+
+  // ══ Parts A / B / E / F — three Baxter reports, edit-contract save, no-deal wage, scatter ═══════
+  banner('Parts A/B/E/F — Baxter reports (labels/columns), edit-contract SAVE, no-deal wage, scatter')
+  {
+    // ── Data-level (getReportData): rows carry every per-round Baxter figure (Parts B + E + F) ──
+    const rd = await inst('getReportData')
+    const rows = rd.rows ?? []
+    assert(rows.length === 16, `Reports — getReportData returns all 16 finalized participants [${rows.length}]`)
+
+    // Part B — the 1978-no-deal group (C, rejecter) shows wage $10.69 + "No deal" in the 1978 report.
+    const cRows = rows.filter(r => r.group_id === rejectGid)
+    assert(cRows.length > 0 && cRows.every(r => near(r.wage_1978, 10.69) && r.agreement_1978 === false),
+      `Part B — 1978-no-deal group shows wage $10.69 + "No deal" in the 1978 report [${cRows.map(r => r.wage_1978).join(',')}]`)
+
+    // Part E/1978 — a ratified dealer (group A) carries its agreed options + $11.69 wage + score 85.
+    const aBax = rows.find(r => r.group_id === gidA && r.role === 'baxter')
+    assert(aBax && aBax.outcome_1978 && aBax.outcome_1978.location === 'deloitte' && aBax.outcome_1978.transfer === 'most',
+      'Part E/1978 — dealer row carries the agreed six-issue 1978 outcome')
+    assert(aBax && near(aBax.wage_1978, 11.69) && aBax.score_1978 === 85,
+      `Part E/1978 — dealer 1978 wage $11.69 + raw score 85 [wage=${aBax?.wage_1978} score=${aBax?.score_1978}]`)
+
+    // Part E/1983 — group A carries its 1983 wage ($9.50) + adjusted score (80.4 Baxter).
+    assert(aBax && near(aBax.wage_1983, 9.50) && near(aBax.score_1983, 80.4),
+      `Part E/1983 — dealer 1983 wage $9.50 + adjusted score 80.4 [wage=${aBax?.wage_1983} adj=${aBax?.score_1983}]`)
+
+    // Part E/1985 — group A carries its six-issue 1985 contract + 1985 score 97.95 + TOTAL 178.35;
+    //   and TOTAL equals the terminal raw_score for every scored row (report ⇄ gradebook consistency).
+    assert(aBax && aBax.outcome_1985 && near(aBax.score_1985, 97.95) && near(aBax.total_score, 178.35),
+      `Part E/1985 — dealer 1985 score 97.95 + TOTAL 178.35 [1985=${aBax?.score_1985} total=${aBax?.total_score}]`)
+    assert(rows.every(r => r.total_score == null || near(r.total_score, r.raw_score, 0.01)),
+      'Part E — every report TOTAL equals the participant terminal raw_score (report matches the gradebook)')
+
+    // Part F — scatter data: each group yields one point (Baxter total vs Union total).
+    const groupTotals = new Map()
+    for (const r of rows) {
+      if (r.group_number == null || r.total_score == null) continue
+      const e = groupTotals.get(r.group_number) ?? {}
+      if (r.role === 'baxter') e.b = r.total_score; else if (r.role === 'union') e.u = r.total_score
+      groupTotals.set(r.group_number, e)
+    }
+    const points = [...groupTotals.values()].filter(e => e.b != null && e.u != null)
+    assert(points.length >= 1, `Part F — scatter has data (${points.length} group points: Baxter total vs Union total)`)
+
+    // ── UI-level (reports page): Baxter labels/titles + populated edit form + scatter renders ──
+    const reports = await (await browser.newContext()).newPage()
+    await reports.goto(`${FE}/reports?_dev_game_instance_id=${encodeURIComponent(GID)}&_session=tab`)
+    await reports.waitForSelector('text=1978 Report', { timeout: 30_000 })
+    // Wait for the page's getReportData to RESOLVE (each report tile shows the finalized count once
+    // rows load) so the assertions below run against loaded data, not the transient loading state
+    // (rows null → disabled tiles + an empty scatter).
+    await reports.waitForSelector('text=/\\d+ participants? ·/', { timeout: 30_000 })
+
+    // Part F — the scatter tile renders WITH data (points present), not the empty placeholder.
+    assert(await reports.locator('text=/N = \\d+ group/').count() > 0,
+      'Part F — scatter renders WITH data (point-count label present), not an empty grid')
+    assert(await reports.locator('text=No completed groups yet.').count() === 0,
+      'Part F — scatter is NOT the empty "No completed groups yet" placeholder')
+
+    // Part E/1978 — open the 1978 Report: Baxter labels/columns, NO Winemaster labels/roles.
+    await reports.getByText('1978 Report', { exact: true }).click()
+    await reports.waitForSelector('h3:has-text("1978 Report")', { timeout: 15_000 })
+    for (const label of ['Location of New Plant', 'Transfer of Local 190', 'Escalator Clause', 'Raw score', 'Notes']) {
+      assert(await reports.locator(`th:has-text("${label}")`).count() > 0, `Part E/1978 — column "${label}" present`)
+    }
+    for (const gone of ['Shares', 'Vesting', 'Board seat', 'Liability']) {
+      assert(await reports.locator(`th:has-text("${gone}")`).count() === 0, `Part E/1978 — Winemaster column "${gone}" REMOVED`)
+    }
+    assert(await reports.locator('td:has-text("Baxter Management")').count() > 0
+        && await reports.locator('td:has-text("Local 190")').count() > 0,
+      'Part E — roles render as Baxter Management / Local 190 (not Winemaster / Home Base)')
+
+    // Part A — edit the first row's (group 1 = ratified dealer A) 1978 contract. The form MUST be
+    // POPULATED from the agreed outcome (the bug: selects came up blank → Save sent empty strings).
+    await reports.locator('button:has-text("Edit")').first().click()
+    await reports.waitForSelector('h3:has-text("Edit group")', { timeout: 15_000 })
+    const sel = reports.locator('select')  // schema order: wages,plant,escalator,incentive,location,transfer
+    const locVal = await sel.nth(4).inputValue()
+    const trVal  = await sel.nth(5).inputValue()
+    assert(locVal === 'deloitte' && trVal === 'most',
+      `Part A — edit form is POPULATED from the agreed 1978 contract (location=${locVal}, transfer=${trVal}), not blank`)
+    // Change escalator maintain → eliminate, Save, and assert it persists + rescores server-side.
+    await sel.nth(2).selectOption('eliminate')
+    await reports.click('button:has-text("Save")')
+    await reports.waitForSelector('h3:has-text("Edit group")', { state: 'detached', timeout: 15_000 })
+    let g1 = null
+    for (let i = 0; i < 15; i++) {
+      const r2 = await inst('getReportData')
+      g1 = (r2.rows ?? []).find(r => r.group_id === gidA && r.role === 'baxter')
+      if (g1 && g1.outcome_1978?.escalator === 'eliminate') break
+      await sleep(1000)
+    }
+    assert(g1 && g1.outcome_1978?.escalator === 'eliminate',
+      `Part A — edit SAVED + persisted (escalator now "${g1?.outcome_1978?.escalator}")`)
+    assert(g1 && g1.score_1978 === 90,
+      `Part A — Save recomputed the group's raw score (Baxter 85 → 90 after escalator maintain→eliminate) [${g1?.score_1978}]`)
+
+    // Part E/1983 + 1985 — the other two report modals render with their Baxter titles/columns.
+    await reports.getByRole('button', { name: '✕' }).click()  // close the 1978 report modal
+    await reports.getByText('1983 Report', { exact: true }).click()
+    await reports.waitForSelector('h3:has-text("1983 Report")', { timeout: 15_000 })
+    assert(await reports.locator('th:has-text("1983 Wage")').count() > 0
+        && await reports.locator('th:has-text("Adjusted score")').count() > 0,
+      'Part E/1983 — 1983 Report shows "1983 Wage" + "Adjusted score" columns')
+    await reports.getByRole('button', { name: '✕' }).click()
+    await reports.getByText('1985 Report', { exact: true }).click()
+    await reports.waitForSelector('h3:has-text("1985 Report")', { timeout: 15_000 })
+    assert(await reports.locator('th:has-text("TOTAL score")').count() > 0
+        && await reports.locator('th:has-text("1985 score")').count() > 0
+        && await reports.locator('th:has-text("Work Rules")').count() > 0,
+      'Part E/1985 — 1985 Report shows the six 1985 issues + "1985 score" + "TOTAL score"')
+  }
 
   banner(`RESULT — ${PASS} passed, ${FAIL} failed`)
   // Any non-throwing assertion failures still get a full page/heading/screenshot dump.
