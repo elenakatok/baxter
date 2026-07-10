@@ -313,11 +313,15 @@ export default function Play() {
     const { participantId, gameInstanceId } = session
     let cancelled = false
     let lastRound: number | null = null
-    let headerLoaded = false
+    let headerLoadedRound: number | null = null
 
-    const loadHeader = (p: GamePhase) => {
-      if (headerLoaded) return
-      headerLoaded = true
+    // Phase-aware role-info: re-fetch the header links whenever the round changes so the
+    // persistent header shows the current round's documents (getInfoUrls is server-round-
+    // derived). evaluate() fires once per distinct round, so keying the guard on the round
+    // index re-loads on advance while staying a no-op within a round.
+    const loadHeader = (p: GamePhase, roundIdx: number) => {
+      if (headerLoadedRound === roundIdx) return
+      headerLoadedRound = roundIdx
       if (p.name === 'info') { setHeaderLinks(p.links); return }
       const fn = httpsCallable<object, GetInfoUrlsResult>(functions, 'getInfoUrls')
       fn({}).then(({ data }) => { if (!cancelled) setHeaderLinks(data.links) }).catch(() => {})
@@ -341,7 +345,7 @@ export default function Play() {
       // to the next round's attendance screen, which ranks EARLIER, and MUST still fire.
       if (!roundChanged && phaseRank(p.name) < phaseRank(phaseRef.current.name)) return
       setPhase(p)
-      loadHeader(p)
+      loadHeader(p, roundIdx)
     }
 
     const unsub = onSnapshot(

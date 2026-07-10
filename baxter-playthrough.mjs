@@ -140,6 +140,66 @@ const inst = (name, extra = {}) => callFn(name, { _dev: { game_instance_id: GID 
 // Student callables travel with the emulator _test bypass (participant + instance id, no JWT).
 const stu = (name, pid, extra = {}) => callFn(name, { _test: { participant_id: pid, game_instance_id: GID }, ...extra })
 
+// ── Phase-aware role-info (role documents slice) ────────────────────────────────
+// getInfoUrls is server-round-derived (reads the instance current_round). Expected
+// per-round × per-role document URLs = the configField defaults declared in gameDefinition.
+const ROLE_INFO_EXPECT = {
+  '1978': {
+    baxter: ['/role-info/1978-baxter-case.pdf', '/role-info/1978-baxter-worksheet.xlsx'],
+    union:  ['/role-info/1978-union-case.pdf',  '/role-info/1978-union-worksheet.xlsx'],
+  },
+  '1983': {
+    baxter: ['/role-info/1983-baxter-brief.pdf'],
+    union:  ['/role-info/1983-union-brief.pdf'],
+  },
+  '1985': {
+    baxter: ['/role-info/1985-baxter-case.pdf', '/role-info/1985-baxter-scoresheet.xlsx'],
+    union:  ['/role-info/1985-union-case.pdf',  '/role-info/1985-union-scoresheet.xlsx'],
+  },
+}
+const ALL_ROLE_INFO_URLS = [...new Set(Object.values(ROLE_INFO_EXPECT).flatMap(r => [...r.baxter, ...r.union]))]
+
+// Assert getInfoUrls serves EXACTLY the caller's current-round docs — never the other
+// role's, never another round's (round-correct + role-correct).
+async function assertRoleInfoServing(round, baxPid, uniPid) {
+  const exp = ROLE_INFO_EXPECT[round]
+  const otherRounds = Object.keys(ROLE_INFO_EXPECT).filter(r => r !== round)
+  const bx = (await stu('getInfoUrls', baxPid)).links.map(l => l.url)
+  const un = (await stu('getInfoUrls', uniPid)).links.map(l => l.url)
+  assert(bx.length === exp.baxter.length && exp.baxter.every(u => bx.includes(u)),
+    `Role-info ${round} — baxter gets its ${exp.baxter.length} ${round} doc(s): ${bx.join(', ')}`)
+  assert(un.length === exp.union.length && exp.union.every(u => un.includes(u)),
+    `Role-info ${round} — union gets its ${exp.union.length} ${round} doc(s): ${un.join(', ')}`)
+  assert(!bx.some(u => u.includes('-union-')), `Role-info ${round} — baxter NEVER sees union docs (role isolation)`)
+  assert(!un.some(u => u.includes('-baxter-')), `Role-info ${round} — union NEVER sees baxter docs (role isolation)`)
+  assert(!bx.some(u => otherRounds.some(r => u.includes(`/role-info/${r}-`))),
+    `Role-info ${round} — baxter sees ONLY round ${round} docs (round-correct switch)`)
+  assert(!un.some(u => otherRounds.some(r => u.includes(`/role-info/${r}-`))),
+    `Role-info ${round} — union sees ONLY round ${round} docs (round-correct switch)`)
+}
+
+// Every placed file must resolve over the frontend origin as a real file — not a 404 and
+// not the SPA index.html fallback (the grays binary-404 lesson).
+async function assertRoleInfoFilesResolve() {
+  for (const u of ALL_ROLE_INFO_URLS) {
+    const r = await fetch(`${FE}${u}`)
+    const ct = r.headers.get('content-type') ?? ''
+    assert(r.status === 200 && !ct.includes('text/html'),
+      `Role-info file resolves (no 404, not SPA-fallback): ${u} [${r.status} ${ct}]`)
+  }
+  // Negative control: a bogus role-info path must NOT resolve as a real file (Vite would
+  // otherwise serve index.html with 200) — proves the resolve check above is real.
+  const bad = await fetch(`${FE}/role-info/__does_not_exist__.pdf`)
+  const badCt = bad.headers.get('content-type') ?? ''
+  assert(!(bad.status === 200 && !badCt.includes('text/html')),
+    `Role-info resolve check is real — bogus file does NOT resolve as a real file [${bad.status} ${badCt}]`)
+}
+
+// The persistent student header must swap its links when the round advances.
+async function headerHrefs(page) {
+  return page.locator('header nav a').evaluateAll(as => as.map(a => a.getAttribute('href')))
+}
+
 // ── Mock classroom callback (Slice 6): stand in for receiveGameResult so the harness can OBSERVE
 // the gradebook push. scoreAndRecord's dispatchResults POSTs one GameResult per participant to this
 // URL (passed via the _dev emulator override); we collect every posted body. The real prod handshake
@@ -620,6 +680,23 @@ async function main() {
     assert(allEq(raws(rejectGid, 'union'), 0),  '1978 REJECT → no-deal — Union = 0')
   }
 
+  // ── Phase-aware role-info: 1978 (current_round=0, before Open Round 2 Attendance) ──
+  banner('Role documents — 1978 phase serving + file resolution + header')
+  {
+    const baxStu = students.find(s => s.role === 'baxter')
+    const uniStu = students.find(s => s.role === 'union')
+    await assertRoleInfoServing('1978', baxStu.pid, uniStu.pid)
+    await assertRoleInfoFilesResolve()
+    assert(true, 'Role-info — all 10 placed documents resolve over the frontend origin (no 404)')
+    // Persistent header shows the 1978 docs for a baxter student now (captured for the round-change proof).
+    await baxStu.page.waitForSelector('header nav a[href*="1978-baxter"]', { timeout: 20_000 })
+    const h1978 = await headerHrefs(baxStu.page)
+    assert(h1978.some(h => h && h.includes('/role-info/1978-baxter')),
+      `Role-info header — baxter student header shows the 1978 docs in 1978: ${h1978.join(', ')}`)
+    assert(!h1978.some(h => h && (h.includes('1983-') || h.includes('1985-'))),
+      'Role-info header — baxter student header shows ONLY 1978 docs in 1978 (no later-round links)')
+  }
+
   // #1 (part b): now that round 1 is completed, the gate button appears → drive it.
   await dash.reload(); await sleep(2500)
   await dash.waitForSelector('button:has-text("Open Round 2 Attendance")', { timeout: 15_000 })
@@ -665,6 +742,14 @@ async function main() {
   {
     const stillThere = await dash.locator('button:has-text("Begin 1983")').isVisible().catch(() => false)
     assert(!stillThere, 'B — "Begin 1983" does NOT reappear once the round has begun')
+  }
+
+  // ── Phase-aware role-info: 1983 (current_round=1) — round-correct switch ──
+  {
+    const baxStu = students.find(s => s.role === 'baxter')
+    const uniStu = students.find(s => s.role === 'union')
+    await assertRoleInfoServing('1983', baxStu.pid, uniStu.pid)
+    assert(true, 'Role-info — advancing to 1983 switched both roles to the 1983 docs (round-correct)')
   }
 
   // ── Slice 3 + 1983 redo-loop: A redo→deal a wage, B no-deals, C (rejecter) idle ──
@@ -862,6 +947,21 @@ async function main() {
   log('instr', `advanceRound → round ${adv.current_round} (${adv.round_id})`)
   await Promise.all(students.map(s => s.page.waitForSelector('h1:has-text("Go negotiate")', { timeout: 30_000 })))
   assert(adv.round_id === '1985', 'Proceed — advanceRound moved the class to 1985 (students re-flow into the negotiation)')
+
+  // ── Phase-aware role-info: 1985 (current_round=2) — incl. the self-scoring sheets + header update ──
+  {
+    const baxStu = students.find(s => s.role === 'baxter')
+    const uniStu = students.find(s => s.role === 'union')
+    await assertRoleInfoServing('1985', baxStu.pid, uniStu.pid)
+    assert(true, 'Role-info — advancing to 1985 switched both roles to the 1985 docs (case + self-scoring sheet)')
+    // Persistent header must have SWAPPED to the 1985 docs on the round change (re-fetch on advance).
+    await baxStu.page.waitForSelector('header nav a[href*="1985-baxter"]', { timeout: 20_000 })
+    const h1985 = await headerHrefs(baxStu.page)
+    assert(h1985.some(h => h && h.includes('/role-info/1985-baxter')),
+      `Role-info header — baxter student header UPDATED to the 1985 docs after advancing: ${h1985.join(', ')}`)
+    assert(!h1985.some(h => h && (h.includes('1978-') || h.includes('1983-'))),
+      'Role-info header — the header no longer shows the earlier rounds\' docs (links swapped, not appended)')
+  }
   // Everyone taps "We've finished" to reach the 1985 report / confirm screens.
   await Promise.all(students.map(s => s.page.click("button:has-text(\"We've finished\")").catch(() => {})))
 

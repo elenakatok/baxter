@@ -123,28 +123,73 @@ export const baxterGameDef: GameDefinition = {
   // perRoleCap omitted → factory uses eligible.length (no cap, place every extra).
   // deadlockThreshold omitted → factory defaults to 5.
 
-  // Settings page config fields. Role-name + role-info defaults.
-  // Role PDFs/worksheets are a later slice (Gary's content); paths are placeholders.
+  // Settings page config fields. Role-name + phase-aware role-info defaults.
+  // Round-scoped keys resolve to the bundled /role-info/ documents; each is
+  // instructor-swappable via the Settings page (Elena's config-keys decision).
   configFields: [
-    { key: 'baxter_role_name',     kind: 'string', default: 'Baxter Management' },
-    { key: 'union_role_name',      kind: 'string', default: 'Local 190'         },
-    { key: 'baxter_sheet_url',     kind: 'url',    default: '/role-info/baxter.pdf'           },
-    { key: 'baxter_worksheet_url', kind: 'url',    default: '/role-info/baxterWorksheet.xlsx' },
-    { key: 'union_sheet_url',      kind: 'url',    default: '/role-info/union.pdf'            },
-    { key: 'union_worksheet_url',  kind: 'url',    default: '/role-info/unionWorksheet.xlsx'  },
+    { key: 'baxter_role_name',          kind: 'string', default: 'Baxter Management' },
+    { key: 'union_role_name',           kind: 'string', default: 'Local 190'         },
+    // 1978
+    { key: 'baxter_1978_case_url',      kind: 'url', default: '/role-info/1978-baxter-case.pdf'       },
+    { key: 'baxter_1978_worksheet_url', kind: 'url', default: '/role-info/1978-baxter-worksheet.xlsx' },
+    { key: 'union_1978_case_url',       kind: 'url', default: '/role-info/1978-union-case.pdf'        },
+    { key: 'union_1978_worksheet_url',  kind: 'url', default: '/role-info/1978-union-worksheet.xlsx'  },
+    // 1983
+    { key: 'baxter_1983_brief_url',     kind: 'url', default: '/role-info/1983-baxter-brief.pdf'      },
+    { key: 'union_1983_brief_url',      kind: 'url', default: '/role-info/1983-union-brief.pdf'       },
+    // 1985
+    { key: 'baxter_1985_case_url',       kind: 'url', default: '/role-info/1985-baxter-case.pdf'        },
+    { key: 'baxter_1985_scoresheet_url', kind: 'url', default: '/role-info/1985-baxter-scoresheet.xlsx' },
+    { key: 'union_1985_case_url',        kind: 'url', default: '/role-info/1985-union-case.pdf'         },
+    { key: 'union_1985_scoresheet_url',  kind: 'url', default: '/role-info/1985-union-scoresheet.xlsx'  },
   ],
 
-  // Info page links — keys match configFields above.
+  // Flat fallback (round-unaware). Baxter declares every round in roleInfoLinksByRound
+  // below, so this is only reached if current_round somehow points at an undeclared
+  // round; it mirrors round 1 (1978) as a safe default.
   roleInfoLinks: [
     { roleKey: 'baxter', links: [
-      { key: 'baxter_sheet_url',     label: 'Role sheet' },
-      { key: 'baxter_worksheet_url', label: 'Worksheet'  },
+      { key: 'baxter_1978_case_url',      label: 'Role packet'       },
+      { key: 'baxter_1978_worksheet_url', label: 'Scoring worksheet' },
     ]},
     { roleKey: 'union', links: [
-      { key: 'union_sheet_url',     label: 'Role sheet' },
-      { key: 'union_worksheet_url', label: 'Worksheet'  },
+      { key: 'union_1978_case_url',      label: 'Role packet'       },
+      { key: 'union_1978_worksheet_url', label: 'Scoring worksheet' },
     ]},
   ],
+
+  // Phase-aware role-info (Option-1 derive). getInfoUrls serves the caller's role's links
+  // for the instance's current round; each role NEVER sees the other role's documents.
+  roleInfoLinksByRound: {
+    '1978': [
+      { roleKey: 'baxter', links: [
+        { key: 'baxter_1978_case_url',      label: 'Role packet'       },
+        { key: 'baxter_1978_worksheet_url', label: 'Scoring worksheet' },
+      ]},
+      { roleKey: 'union', links: [
+        { key: 'union_1978_case_url',      label: 'Role packet'       },
+        { key: 'union_1978_worksheet_url', label: 'Scoring worksheet' },
+      ]},
+    ],
+    '1983': [
+      { roleKey: 'baxter', links: [
+        { key: 'baxter_1983_brief_url', label: '1983 round brief' },
+      ]},
+      { roleKey: 'union', links: [
+        { key: 'union_1983_brief_url', label: '1983 round brief' },
+      ]},
+    ],
+    '1985': [
+      { roleKey: 'baxter', links: [
+        { key: 'baxter_1985_case_url',       label: 'Role packet'   },
+        { key: 'baxter_1985_scoresheet_url', label: 'Scoring sheet' },
+      ]},
+      { roleKey: 'union', links: [
+        { key: 'union_1985_case_url',       label: 'Role packet'   },
+        { key: 'union_1985_scoresheet_url', label: 'Scoring sheet' },
+      ]},
+    ],
+  },
 
   // KC content (Slice 7). The mandatory role-identification gate (one per role, system +
   // ungraded, grading:'assigned_role' — exactly one per role, enforced by validateKCGate) plus:
