@@ -582,6 +582,70 @@ async function drive1978Negotiation(students) {
   return { ratifiedGids, failRatifyGid, rejectGid, dealerMemberPids }
 }
 
+// ── Save-unchanged UI coverage (the exact editor-binding repro) ─────────────────
+// The bug that slipped through: the editor selects came up BLANK (state not bound from the row's
+// outcome), so Save sent empty strings → "field must be one of […], got ''". These drive the REAL
+// browser Save path (open → save) — a data-level updateGroupContract call would NOT catch it:
+//   (a) open a populated (dealer) editor, change NOTHING, Save → SUCCEEDS + persists the shown values.
+//   (b) change ONE field, Save → all six persist (the changed one + the five untouched).
+// Exercised for BOTH the 1978 and 1985 editors.
+const ISSUE_KEYS_BY_ROUND = {
+  '1978': ['wages', 'plant_operation', 'escalator', 'incentive', 'location', 'transfer'],
+  '1985': ['incentive85', 'work_rules85', 'hiring85', 'notices85', 'seniority85'],  // + wage85 (number)
+}
+async function driveSaveUnchanged(reports, round) {
+  const tile = `${round} Report`
+  const enums = ISSUE_KEYS_BY_ROUND[round]
+  const outcomeOf = r => (round === '1978' ? r?.outcome_1978 : r?.outcome_1985)
+  const outcomeForGroup = async gnum =>
+    outcomeOf((await inst('getReportData')).rows.find(r => r.group_number === gnum))
+
+  await reports.getByText(tile, { exact: true }).click()
+  await reports.waitForSelector(`h3:has-text("${tile}")`, { timeout: 15_000 })
+
+  // Open a DEALER row's editor (Notes cell == exactly "Deal" — the populated form the bug corrupted)
+  // and return the group number the modal title reports (== getReportData group_number).
+  const openDealerEditor = async () => {
+    const row = reports.getByRole('row').filter({ has: reports.getByRole('cell', { name: 'Deal', exact: true }) }).first()
+    await row.getByRole('button', { name: 'Edit' }).click()
+    await reports.waitForSelector(`h3:has-text("${round} contract")`, { timeout: 15_000 })
+    const title = await reports.locator(`h3:has-text("${round} contract")`).innerText()
+    return parseInt(title.match(/group\s+(\d+)/i)[1], 10)
+  }
+  const saveClosed = async () =>
+    reports.getByRole('button', { name: 'Save', exact: true }).click()
+      .then(() => reports.waitForSelector(`h3:has-text("${round} contract")`, { state: 'detached', timeout: 15_000 }))
+      .then(() => true).catch(() => false)
+
+  // (a) Save with NO changes → succeeds + persists the displayed values (nothing blanked).
+  const gnumA = await openDealerEditor()
+  const beforeA = await outcomeForGroup(gnumA)
+  const closedA = await saveClosed()
+  assert(closedA,
+    `Save-unchanged/${round} (a) — editor Save with NO changes SUCCEEDS (modal closes, no "must be one of … got ''" error)`)
+  const afterA = await outcomeForGroup(gnumA)
+  assert(afterA != null && enums.every(k => afterA[k] === beforeA[k]) && (round === '1978' || near(afterA.wage85, beforeA.wage85)),
+    `Save-unchanged/${round} (a) — all displayed fields PERSIST unchanged after the no-op Save (no field blanked)`)
+
+  // (b) Change ONE field → all six persist (the changed one + the five untouched).
+  const gnumB = await openDealerEditor()
+  const beforeB = await outcomeForGroup(gnumB)
+  const changedKey = enums[0]
+  const sel = reports.locator('select').first()  // the editor's first enum select (report table has none)
+  const optVals = await sel.locator('option').evaluateAll(os => os.map(o => o.value))
+  const newVal = optVals.find(v => v && v !== beforeB[changedKey])
+  await sel.selectOption(newVal)
+  const closedB = await saveClosed()
+  assert(closedB, `Save-unchanged/${round} (b) — one-field-changed Save SUCCEEDS`)
+  const afterB = await outcomeForGroup(gnumB)
+  const untouched = enums.filter(k => k !== changedKey)
+  assert(afterB != null && afterB[changedKey] === newVal
+      && untouched.every(k => afterB[k] === beforeB[k]) && (round === '1978' || near(afterB.wage85, beforeB.wage85)),
+    `Save-unchanged/${round} (b) — changed field saved (${changedKey}=${newVal}) AND all five untouched fields persist`)
+
+  await reports.getByRole('button', { name: '✕' }).click()  // close the report modal
+}
+
 // ── MAIN ──────────────────────────────────────────────────────────────────────
 
 async function main() {
@@ -1416,6 +1480,18 @@ async function main() {
     assert(aAfter && aAfter.score_1978 === aBefore.score_1978 && aAfter.outcome_1985 != null
         && near(aAfter.total_score, aBefore.total_score, 0.01),
       '1978 editor NO-REGRESSION — default round=1978 round-trips (score_1978 unchanged, group A 1985 deal untouched)')
+  }
+
+  // ══ Save-unchanged UI coverage — open editor, Save with no change → succeeds + persists ═════════
+  // (Both editors now have dealer rows: 1978 = A/B/D; 1985 = A + B, B edited into a deal above.)
+  banner('Save-unchanged — 1978 + 1985 editors: no-op Save succeeds & persists; one-field change persists all six')
+  {
+    const reports = await (await browser.newContext()).newPage()
+    await reports.goto(`${FE}/reports?_dev_game_instance_id=${encodeURIComponent(GID)}&_session=tab`)
+    await reports.waitForSelector('text=1978 Report', { timeout: 30_000 })
+    await reports.waitForSelector('text=/\\d+ participants? ·/', { timeout: 30_000 })  // rows loaded
+    await driveSaveUnchanged(reports, '1978')
+    await driveSaveUnchanged(reports, '1985')
   }
 
   // ══ Settings — 10 phase-aware Info Links (grouped by round), NO Reservation Prices ═══════════
