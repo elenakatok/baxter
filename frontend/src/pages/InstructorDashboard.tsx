@@ -68,6 +68,10 @@ type ArbGroup = {
   wage83: number | null
   w78: number | null
   arbitration?: { side: 'baxter' | 'union'; wage: number }
+  /** Round-1 (1978) deal flag — false = the group walked away / failed to agree. */
+  agreement1978: boolean
+  /** Whether the group has a recorded 1985 deal (outcomes_by_round['1985'] present). */
+  has1985: boolean
 }
 
 function useBaxterGroups(): ArbGroup[] {
@@ -87,7 +91,8 @@ function useBaxterGroups(): ArbGroup[] {
           )
           setGroups(snap.docs.map((g) => {
             const d = g.data() as Record<string, unknown>
-            const o1983 = (d['outcomes_by_round'] as Record<string, unknown> | undefined)?.['1983'] as Record<string, unknown> | null | undefined
+            const byRound = d['outcomes_by_round'] as Record<string, unknown> | undefined
+            const o1983 = byRound?.['1983'] as Record<string, unknown> | null | undefined
             const w83 = o1983?.['wage83']
             const wagesOpt = (d['outcome'] as Record<string, unknown> | null)?.['wages']
             const arb = d['arbitration_1983'] as { side: 'baxter' | 'union'; wage: number } | undefined
@@ -98,6 +103,8 @@ function useBaxterGroups(): ArbGroup[] {
               wage83: typeof w83 === 'number' ? w83 : null,
               w78: typeof wagesOpt === 'string' ? (WAGE_DOLLARS[wagesOpt] ?? null) : null,
               arbitration: arb,
+              agreement1978: (d['outcome'] as Record<string, unknown> | null) != null && d['agreement_reached'] !== false,
+              has1985: (byRound?.['1985'] as Record<string, unknown> | null | undefined) != null,
             }
           }))
         },
@@ -256,6 +263,45 @@ function BaxterProceedTo1985({ sessionReady, allCompleted, reload }: { sessionRe
   )
 }
 
+// ── No-deal early-warning flag (Fix 3 — Baxter-specific dashboard chrome) ──────
+// Visibly flags any group that ENDED the current round with no recorded deal — before the
+// instructor runs Score & Record and grades lock. A no-deal can be a genuine walk-away OR a
+// mis-record (e.g. a single 1985 non-lead reject that terminated a real deal). Either way the
+// instructor sees it up-front and can correct it in Reports → Edit (Fix 1). Baxter-specific
+// because the shared dashboard has no notion of Baxter's rounds / the 1985 keyed outcome.
+//   • 1978 (round 0): completed with no agreed deal.
+//   • 1985 (round 2): completed with no recorded 1985 deal (outcomes_by_round['1985'] absent).
+//   • 1983 is intentionally omitted — no-agreement 1983 groups surface in the arbitration queue.
+function BaxterNoDealFlags({ currentRound }: { currentRound: number }) {
+  const groups = useBaxterGroups()
+  const roundId = BAXTER_ROUNDS[currentRound]
+  if (roundId !== '1978' && roundId !== '1985') return null
+
+  const flagged = groups.filter(g => {
+    if (g.status !== 'completed') return false
+    return roundId === '1985' ? !g.has1985 : !g.agreement1978
+  })
+  if (flagged.length === 0) return null
+
+  return (
+    <div style={noDealBoxStyle}>
+      <strong style={{ fontSize: '0.9rem', color: '#8a1f11' }}>
+        ⚠ No-deal {roundId} — {flagged.length} group{flagged.length !== 1 ? 's' : ''}
+      </strong>
+      <span style={hintStyle}>
+        {flagged.length === 1 ? 'This group' : 'These groups'} recorded NO DEAL for {roundId}. If a
+        group actually reached agreement, correct it in Reports → {roundId} Report → Edit before
+        Score &amp; Record.
+      </span>
+      <div style={{ display: 'flex', gap: '0.4rem', flexWrap: 'wrap' }}>
+        {flagged.map(g => (
+          <span key={g.id} style={noDealBadgeStyle}>Group {g.group_number}</span>
+        ))}
+      </div>
+    </div>
+  )
+}
+
 // ── Deadlock resolution control (schema-driven — the 1978 six-issue contract) ──
 
 function baxterDefaultForm(): FormValues {
@@ -336,6 +382,14 @@ const arbBoxStyle: CSSProperties = {
   padding: '0.6rem 0.8rem', border: '1px solid #e5c07b', background: '#fdf6e3', borderRadius: 6,
 }
 const arbRowStyle: CSSProperties = { display: 'flex', alignItems: 'center', gap: '0.75rem', flexWrap: 'wrap' }
+const noDealBoxStyle: CSSProperties = {
+  display: 'flex', flexDirection: 'column', gap: '0.4rem', marginTop: '0.5rem',
+  padding: '0.6rem 0.8rem', border: '1px solid #e0857a', background: '#fdecea', borderRadius: 6,
+}
+const noDealBadgeStyle: CSSProperties = {
+  padding: '0.15rem 0.55rem', borderRadius: 12, background: '#c0362c', color: '#fff',
+  fontSize: '0.8rem', fontWeight: 600,
+}
 
 function BaxterDay2Controls({ ctx, round2Begun }: { ctx: RoundControlsContext; round2Begun: boolean }) {
   const { rounds, currentRound, sessionReady, groups, reload } = ctx
@@ -444,7 +498,13 @@ export default function InstructorDashboard() {
       settingsRoute="/settings"
       reportsRoute="/reports"
       scoreAndRecord={{ callableName: 'scoreAndRecord', label: 'Score & Record' }}
-      renderRoundControls={ctx => <BaxterDay2Controls ctx={ctx} round2Begun={round2Begun} />}
+      renderRoundControls={ctx => (
+        <>
+          <BaxterDay2Controls ctx={ctx} round2Begun={round2Begun} />
+          {/* No-deal early warning — renders on every round (BaxterDay2Controls is null at 1985). */}
+          <BaxterNoDealFlags currentRound={currentRound} />
+        </>
+      )}
     />
   )
 }

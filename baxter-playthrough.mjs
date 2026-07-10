@@ -522,8 +522,19 @@ async function drive1978Negotiation(students) {
   await rLead.page.click('button:has-text("Yes, submit")')
   const rejecter = rNonLeads[0]
   await rejecter.page.waitForSelector('h1:has-text("Confirm")', { timeout: 30_000 })
+  // Fix 2 — the 1978 reject is ALSO confirm-gated (same shared OutcomeReporting flow, ultimatum
+  // round): the first Reject click opens "Are you sure?" and does NOT terminate; the explicit
+  // confirm click is what ends it. This proves the guard covers 1978, not just 1985.
   await rejecter.page.click('button:has-text("Reject")')
-  log(rejectGid, `rejecter ${rejecter.pid} clicked Reject (1978 ultimatum)`)
+  await rejecter.page.waitForSelector('h1:has-text("Are you sure")', { timeout: 10_000 })
+  assert(true, 'Fix 2 — 1978 Reject is confirm-gated too ("Are you sure?" before the terminal no-deal)')
+  {
+    const c0 = (await readGroupsFull()).find(x => x.id === rejectGid)
+    assert(c0?.status !== 'completed',
+      'Fix 2 — 1978 reject WITHOUT confirm does NOT terminate the negotiation (group still open)')
+  }
+  await rejecter.page.click('button:has-text("Yes, reject")')
+  log(rejectGid, `rejecter ${rejecter.pid} confirmed Reject (1978 ultimatum)`)
   await pollGroupsFull(g => g.find(x => x.id === rejectGid)?.status === 'completed', 30_000)
 
   // ── DEGENERATE probe (Slice 5): score NOW — C is a no-deal Baxter but ZERO groups have a
@@ -827,7 +838,12 @@ async function main() {
   await leadA.page.waitForSelector('h1:has-text("Confirm outcome")', { timeout: 10_000 })
   await leadA.page.click('button:has-text("Yes, submit")')
   await nonA[0].page.waitForSelector('h1:has-text("Confirm")', { timeout: 30_000 })
+  // Fix 2 — reject is confirm-gated in 1983 too, but here it is NON-terminal (accept/redo loop):
+  // the confirm copy says the outcome goes back to the lead, and confirming triggers the redo.
   await nonA[0].page.click('button:has-text("Reject")')
+  await nonA[0].page.waitForSelector('h1:has-text("Are you sure")', { timeout: 10_000 })
+  assert(true, 'Fix 2 — 1983 Reject is confirm-gated (non-terminal: confirm sends the outcome back to the lead)')
+  await nonA[0].page.click('button:has-text("Yes, reject")')
   // 1983 stays on the accept/REDO loop → reject RESETS: the lead is sent back to re-report.
   const redoOffered = await leadA.page.waitForSelector('h1:has-text("Report outcome")', { timeout: 20_000 })
     .then(() => true).catch(() => false)
@@ -1054,10 +1070,35 @@ async function main() {
   await leadB85.page.waitForSelector('h1:has-text("Confirm outcome")', { timeout: 10_000 })
   await leadB85.page.click('button:has-text("Yes, submit")')
   await nonB85[0].page.waitForSelector('h1:has-text("Confirm")', { timeout: 30_000 })
+
+  // ── Fix 2 — reject-confirm: a terminal (ultimatum) reject must NOT commit on the first click ──
+  // The receiver clicks Reject → a confirm step ("Are you sure?") appears; the group stays OPEN.
   await nonB85[0].page.click('button:has-text("Reject")')
+  await nonB85[0].page.waitForSelector('h1:has-text("Are you sure")', { timeout: 10_000 })
+  assert(true, 'Fix 2 — 1985 Reject opens a confirmation step ("Are you sure?"), does not commit on the first click')
+  {
+    const b0 = (await readGroupsFull()).find(x => x.id === gidB)
+    assert(b0?.status !== 'completed' && b0?.wage85 == null,
+      'Fix 2 — reject WITHOUT confirm does NOT terminate the 1985 negotiation (group still open, no no-deal recorded)')
+  }
+  // "No, go back" is a real escape hatch — it returns to the outcome-review screen, still open.
+  await nonB85[0].page.click('button:has-text("No, go back")')
+  await nonB85[0].page.waitForSelector('h1:has-text("Confirm the outcome")', { timeout: 10_000 })
+  assert(true, 'Fix 2 — "No, go back" returns to the outcome-review screen (an accidental Reject is recoverable)')
+  {
+    const b1 = (await readGroupsFull()).find(x => x.id === gidB)
+    assert(b1?.status !== 'completed',
+      'Fix 2 — after cancelling the reject, the group is STILL open (no no-deal was written)')
+  }
+  // Now reject FOR REAL: Reject → confirm. Only the explicit second click ends the negotiation.
+  await nonB85[0].page.click('button:has-text("Reject")')
+  await nonB85[0].page.waitForSelector('h1:has-text("Are you sure")', { timeout: 10_000 })
+  await nonB85[0].page.click('button:has-text("Yes, reject")')
   {
     const gs = await pollGroupsFull(g => g.find(x => x.id === gidB)?.status === 'completed', 30_000)
     const b = gs.find(x => x.id === gidB)
+    assert(b?.status === 'completed' && b?.wage85 == null,
+      'Fix 2 — reject WITH confirm DOES terminate (only the explicit second click ends it as no-deal)')
     // The per-round no-deal for rounds 2+ is represented by the KEYED 1985 slot being committed
     // null (the flat agreement_reached is round-1 scoped under Option-1 derive — B still reads
     // true from its 1978 deal). So the terminal signal is: status completed + no 1985 wage.
@@ -1302,6 +1343,79 @@ async function main() {
         && await reports.locator('th:has-text("1985 score")').count() > 0
         && await reports.locator('th:has-text("Work Rules")').count() > 0,
       'Part E/1985 — 1985 Report shows the six 1985 issues + "1985 score" + "TOTAL score"')
+
+    // Fix 1 (UI wiring) — the 1985 Report now carries a per-group Edit column; opening it shows the
+    // 1985 six-issue form (wage + five selects), mirroring the 1978 editor. (The data-level edit +
+    // rescore is exercised below via updateGroupContract round:'1985'.)
+    assert(await reports.locator('th:has-text("Notes")').count() > 0
+        && await reports.locator('button:has-text("Edit")').count() > 0,
+      'Fix 1 — 1985 Report has a Notes (Deal/No deal) column + per-group Edit buttons')
+    await reports.locator('button:has-text("Edit")').first().click()
+    await reports.waitForSelector('h3:has-text("1985 contract")', { timeout: 15_000 })
+    assert(await reports.locator('select').count() === 5 && await reports.locator('input[type=number]').count() === 1,
+      'Fix 1 — the 1985 editor renders the six-issue 1985 form (one wage field + five option selects)')
+    await reports.getByRole('button', { name: 'Cancel' }).click()
+  }
+
+  // ══ Fixes 1 + 3 — 1985 no-deal recovery (editable) + dashboard no-deal early-warning flag ═══════
+  banner('Fixes 1 + 3 — 1985 editable (updateGroupContract round:1985) + dashboard no-deal flag')
+  {
+    // Group B rejected its 1985 ultimatum → recorded NO DEAL. This is the exact production bug: a
+    // single non-lead reject locked a would-be deal as no-deal, and there was NO instructor fix.
+    const bNum = (await inst('getReportData')).rows.find(r => r.group_id === gidB)?.group_number
+
+    // ── Fix 3 — the dashboard FLAGS group B's 1985 no-deal (before scoring/grades lock) ──
+    await dash.reload(); await sleep(2500)
+    await dash.waitForSelector('text=/No-deal 1985/', { timeout: 15_000 })
+    const flagBox = dash.locator('div:has(> strong:has-text("No-deal 1985"))').first()
+    assert(await flagBox.count() > 0,
+      'Fix 3 — dashboard shows a no-deal early-warning flag at 1985 (visible before Score & Record)')
+    assert(await flagBox.locator(`text=Group ${bNum}`).count() > 0,
+      `Fix 3 — the flag names the group that ended 1985 no-deal (Group ${bNum})`)
+
+    // ── Fix 1 — the instructor edits group B's 1985 no-deal into the deal it actually reached ──
+    const before = (await inst('getReportData')).rows.filter(r => r.group_id === gidB)
+    assert(before.every(r => r.outcome_1985 == null),
+      'Fix 1 — group B starts as a 1985 NO-DEAL (outcomes_by_round[1985] absent) before the edit')
+
+    // DEAL_A_1985 as a server payload (decimal wage numeric; enums as stored option keys). Scores:
+    //   Baxter 1985 = 10.51  (wage −(25/4.02)(11−12.69)=10.51; all five options score 0)
+    //   Union  1985 = 89.49  (wage (25/4.02)(11−8.67)=14.49 + 10+15+20+15+15)
+    const DEAL_A_1985_NUM = { wage85: 11.0, incentive85: 'above_quota', work_rules85: 'jointly_determined', hiring85: 'layoff_100', notices85: 'yes', seniority85: 'all' }
+    const edit = await inst('updateGroupContract', { groupId: gidB, agreement_reached: true, round: '1985', outcome: DEAL_A_1985_NUM })
+    const bBax = (edit.rows ?? []).find(r => r.group_id === gidB && r.role === 'baxter')
+    const bUni = (edit.rows ?? []).find(r => r.group_id === gidB && r.role === 'union')
+    assert(bBax?.outcome_1985 != null && near(bBax.outcome_1985.wage85, 11.0),
+      'Fix 1 — updateGroupContract(round:1985) WROTE outcomes_by_round[1985] on the group (wage85 $11.00)')
+    // Recompute from the reservation/no-deal path → the REAL negotiated deal score (adjusted-1978 +
+    //   1985 deal): Baxter 89.6 + 10.51 = 100.11; Union 36.2 + 89.49 = 125.69.
+    assert(near(bBax?.score_1985, 10.51) && near(bBax?.total_score, 100.11),
+      `Fix 1 — group B Baxter recomputes to the DEAL score (1985 10.51, TOTAL 100.11), not the no-deal fallback [1985=${bBax?.score_1985} total=${bBax?.total_score}]`)
+    assert(near(bUni?.score_1985, 89.49) && near(bUni?.total_score, 125.69),
+      `Fix 1 — group B Union recomputes to the DEAL score (1985 89.49, TOTAL 125.69) [1985=${bUni?.score_1985} total=${bUni?.total_score}]`)
+
+    // Persistence — the group doc + the members' report-only raw_score both reflect the recorded deal.
+    const gAfter = (await readGroupsFull()).find(x => x.id === gidB)
+    assert(near(gAfter?.wage85, 11.0),
+      'Fix 1 — outcomes_by_round[1985] PERSISTED on the group doc (survives a fresh read)')
+    const bMembers = (await readParticipants()).filter(p => p.group_id === gidB)
+    assert(bMembers.filter(p => p.role === 'baxter').every(p => near(p.raw_score, 100.11))
+        && bMembers.filter(p => p.role === 'union').every(p => near(p.raw_score, 125.69)),
+      'Fix 1 — group B members\' raw_score recomputed to the deal total (report-only rescore, like the 1978 editor)')
+
+    // ── Fix 3 (live) — the no-deal flag CLEARS once the group is edited into a deal ──
+    await dash.reload(); await sleep(2500)
+    assert(await dash.locator('text=/No-deal 1985/').count() === 0,
+      'Fix 3 — the no-deal flag CLEARS after the group is edited into a 1985 deal (live; the warning resolves)')
+
+    // ── 1978 editor no-regression — round DEFAULTS to 1978; re-saving group A\'s 1978 contract with
+    //    NO round arg still hits the 1978 path (idempotent) and leaves A\'s 1985 deal untouched. ──
+    const aBefore = (await inst('getReportData')).rows.find(r => r.group_id === gidA && r.role === 'baxter')
+    const reA = await inst('updateGroupContract', { groupId: gidA, agreement_reached: true, outcome: aBefore.outcome_1978 })
+    const aAfter = (reA.rows ?? []).find(r => r.group_id === gidA && r.role === 'baxter')
+    assert(aAfter && aAfter.score_1978 === aBefore.score_1978 && aAfter.outcome_1985 != null
+        && near(aAfter.total_score, aBefore.total_score, 0.01),
+      '1978 editor NO-REGRESSION — default round=1978 round-trips (score_1978 unchanged, group A 1985 deal untouched)')
   }
 
   // ══ Settings — 10 phase-aware Info Links (grouped by round), NO Reservation Prices ═══════════

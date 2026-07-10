@@ -114,6 +114,7 @@ export default function OutcomeReporting({
   const [formValues,    setFormValues]    = useState<FormValues>(() => uiDefaultFormValues(schema))
   const [pendingDeal,   setPendingDeal]   = useState<OutcomeFields | null>(null)
   const [pendingNoDeal, setPendingNoDeal] = useState(false)
+  const [pendingReject, setPendingReject] = useState(false)
   const [submitting,    setSubmitting]    = useState(false)
   const [formError,     setFormError]     = useState<string | null>(null)
   const [actionError,   setActionError]   = useState<string | null>(null)
@@ -141,6 +142,7 @@ export default function OutcomeReporting({
           setActionError(null)
           setPendingDeal(null)
           setPendingNoDeal(false)
+          setPendingReject(false)
         }
       },
     )
@@ -194,7 +196,12 @@ export default function OutcomeReporting({
 
   // ── Non-lead handlers ─────────────────────────────────────────────────────
   const handleConfirm = () => withSubmit(() => submitConfirmation(args, true))
-  const handleReject  = () => withSubmit(() => submitConfirmation(args, false))
+  // Reject is guarded (Fix 2): the button opens a confirm step; the negotiation is only ended after
+  // an explicit second click. In the ultimatum rounds (1978 / 1985) a single reject is TERMINAL —
+  // it locks the group as no-deal with no redo — so an accidental click otherwise destroys the deal.
+  const handleReject        = () => { setPendingReject(true); setActionError(null) }
+  const handleConfirmReject = () => { setPendingReject(false); withSubmit(() => submitConfirmation(args, false)) }
+  const handleCancelReject  = () => setPendingReject(false)
 
   // ── Loading ─────────────────────────────────────────────────────────────────
   if (!groupData) {
@@ -372,6 +379,33 @@ export default function OutcomeReporting({
   }
 
   const myConf = confirmations[participantId]
+
+  // Reject confirm step (Fix 2): reached only after the non-lead clicks Reject in the pending view.
+  // In the ultimatum rounds (1978 / 1985) a reject is TERMINAL and cannot be undone by the group; in
+  // 1983 (accept/redo) it sends the outcome back to the lead. Copy is round-aware.
+  if (myConf === 'pending' && pendingReject) {
+    const terminalReject = roundId !== '1983'
+    return (
+      <main style={mainStyle}>
+        <p style={subtitleStyle}>You are {roleLabel}</p>
+        <h1 style={h1Style}>Are you sure?</h1>
+        <p style={{ fontSize: '1.05rem', lineHeight: 1.6, color: '#555', marginBottom: '1.25rem' }}>
+          {terminalReject
+            ? 'Rejecting ends this negotiation with NO DEAL. Your group cannot undo it. Only reject if your group truly did not reach an agreement.'
+            : 'Rejecting sends the outcome back to your lead to re-enter. Only reject if it does not match what your group agreed.'}
+        </p>
+        {actionError && <p style={errorStyle}>{actionError}</p>}
+        <div style={btnRowStyle}>
+          <button onClick={handleConfirmReject} disabled={submitting}>
+            {submitting ? 'Submitting…' : terminalReject ? 'Yes, reject — no deal' : 'Yes, reject'}
+          </button>
+          <button onClick={handleCancelReject} disabled={submitting} style={ghostBtnStyle}>
+            No, go back
+          </button>
+        </div>
+      </main>
+    )
+  }
 
   // Pending: show outcome for review
   if (myConf === 'pending') {

@@ -163,6 +163,21 @@ const roleCol = (): SortableColumn<ReportRow, string> => ({
 const numCell = (n: number | null | undefined) =>
   <span style={{ fontVariantNumeric: 'tabular-nums' }}>{fmtScore(n ?? null)}</span>
 
+// Shared trailing Edit column — opens the round-aware group-contract editor (1978 or 1985).
+const editCol = (onEdit: (r: ReportRow) => void, canEdit: boolean): SortableColumn<ReportRow, string> => ({
+  key: 'edit', label: '', headerStyle: { cursor: 'default' }, sticky: 'right',
+  render: r => (
+    <button
+      onClick={() => onEdit(r)}
+      disabled={!r.group_id || !canEdit}
+      style={{ background: 'none', border: '1px solid #ccc', borderRadius: 4, padding: '0.2rem 0.6rem', cursor: 'pointer', fontSize: '0.8rem' }}
+    >
+      Edit
+    </button>
+  ),
+  compare: () => 0,
+})
+
 // ── 1978 report columns (six issues + wage + raw score + notes) ────────────────
 function columns1978(onEdit: (r: ReportRow) => void, canEdit: boolean): SortableColumn<ReportRow, string>[] {
   return [
@@ -187,19 +202,7 @@ function columns1978(onEdit: (r: ReportRow) => void, canEdit: boolean): Sortable
       render: r => r.agreement_1978 ? 'Deal' : 'No deal',
       compare: (a, b) => Number(a.agreement_1978) - Number(b.agreement_1978),
     },
-    {
-      key: 'edit', label: '', headerStyle: { cursor: 'default' }, sticky: 'right',
-      render: r => (
-        <button
-          onClick={() => onEdit(r)}
-          disabled={!r.group_id || !canEdit}
-          style={{ background: 'none', border: '1px solid #ccc', borderRadius: 4, padding: '0.2rem 0.6rem', cursor: 'pointer', fontSize: '0.8rem' }}
-        >
-          Edit
-        </button>
-      ),
-      compare: () => 0,
-    },
+    editCol(onEdit, canEdit),
   ]
 }
 
@@ -223,34 +226,42 @@ const columns1983: SortableColumn<ReportRow, string>[] = [
 ]
 
 // ── 1985 report columns (six 1985 issues + carried-in 1983 + 1985 + TOTAL) ─────
-const columns1985: SortableColumn<ReportRow, string>[] = [
-  nameCol(), groupCol(), roleCol(),
-  {
-    key: 'wage85', label: FIELD_LABELS['wage85'] ?? 'Hourly wage ($)',
-    render: r => <span style={{ fontVariantNumeric: 'tabular-nums' }}>{r.outcome_1985 ? money(r.outcome_1985['wage85'] as number) : '—'}</span>,
-    compare: (a, b) => num((a.outcome_1985?.['wage85'] as number) ?? null) - num((b.outcome_1985?.['wage85'] as number) ?? null),
-  },
-  ...ISSUES_1985.map(issue => ({
-    key: `j_${issue.key}`, label: FIELD_LABELS[issue.key] ?? issue.key,
-    render: (r: ReportRow) => opt1985Cell(r, issue.key),
-    compare: (a: ReportRow, b: ReportRow) => opt1985Cell(a, issue.key).localeCompare(opt1985Cell(b, issue.key)),
-  } satisfies SortableColumn<ReportRow, string>)),
-  {
-    key: 'carry83', label: '1983 score (carried in)', nullsLast: true, isNull: r => r.score_1983 == null,
-    render: r => numCell(r.score_1983),
-    compare: (a, b) => num(a.score_1983) - num(b.score_1983),
-  },
-  {
-    key: 'score85', label: '1985 score', nullsLast: true, isNull: r => r.score_1985 == null,
-    render: r => numCell(r.score_1985),
-    compare: (a, b) => num(a.score_1985) - num(b.score_1985),
-  },
-  {
-    key: 'total', label: 'TOTAL score', nullsLast: true, isNull: r => r.total_score == null,
-    render: r => <strong style={{ fontVariantNumeric: 'tabular-nums' }}>{fmtScore(r.total_score)}</strong>,
-    compare: (a, b) => num(a.total_score) - num(b.total_score),
-  },
-]
+function columns1985(onEdit: (r: ReportRow) => void, canEdit: boolean): SortableColumn<ReportRow, string>[] {
+  return [
+    nameCol(), groupCol(), roleCol(),
+    {
+      key: 'wage85', label: FIELD_LABELS['wage85'] ?? 'Hourly wage ($)',
+      render: r => <span style={{ fontVariantNumeric: 'tabular-nums' }}>{r.outcome_1985 ? money(r.outcome_1985['wage85'] as number) : '—'}</span>,
+      compare: (a, b) => num((a.outcome_1985?.['wage85'] as number) ?? null) - num((b.outcome_1985?.['wage85'] as number) ?? null),
+    },
+    ...ISSUES_1985.map(issue => ({
+      key: `j_${issue.key}`, label: FIELD_LABELS[issue.key] ?? issue.key,
+      render: (r: ReportRow) => opt1985Cell(r, issue.key),
+      compare: (a: ReportRow, b: ReportRow) => opt1985Cell(a, issue.key).localeCompare(opt1985Cell(b, issue.key)),
+    } satisfies SortableColumn<ReportRow, string>)),
+    {
+      key: 'notes85', label: 'Notes',
+      render: r => r.outcome_1985 != null ? 'Deal' : 'No deal',
+      compare: (a, b) => Number(a.outcome_1985 != null) - Number(b.outcome_1985 != null),
+    },
+    {
+      key: 'carry83', label: '1983 score (carried in)', nullsLast: true, isNull: r => r.score_1983 == null,
+      render: r => numCell(r.score_1983),
+      compare: (a, b) => num(a.score_1983) - num(b.score_1983),
+    },
+    {
+      key: 'score85', label: '1985 score', nullsLast: true, isNull: r => r.score_1985 == null,
+      render: r => numCell(r.score_1985),
+      compare: (a, b) => num(a.score_1985) - num(b.score_1985),
+    },
+    {
+      key: 'total', label: 'TOTAL score', nullsLast: true, isNull: r => r.total_score == null,
+      render: r => <strong style={{ fontVariantNumeric: 'tabular-nums' }}>{fmtScore(r.total_score)}</strong>,
+      compare: (a, b) => num(a.total_score) - num(b.total_score),
+    },
+    editCol(onEdit, canEdit),
+  ]
+}
 
 type ReportKind = '1978' | '1983' | '1985'
 
@@ -369,35 +380,43 @@ export default function Reports() {
     }
   }
 
-  // ── Inline group-contract editor (report-only: edits the 1978 six-issue contract and
-  //    recomputes each member's 1978 raw_score via updateGroupContract; never z-scores) ──
-  const [editing,    setEditing]    = useState<{ groupId: string; groupNumber: number | null } | null>(null)
+  // ── Inline group-contract editor (report-only: edits the 1978 or 1985 contract and recomputes
+  //    each member's raw_score via updateGroupContract; never z-scores). Round-aware: the 1985
+  //    editor lets an instructor record the deal a group actually reached when a single non-lead
+  //    reject mis-locked the group as no-deal (outcomes_by_round['1985'] = null). ──
+  const [editing,    setEditing]    = useState<{ groupId: string; groupNumber: number | null; round: '1978' | '1985' } | null>(null)
   const [formValues, setFormValues] = useState<FormValues>({})
   const [dealReached, setDealReached] = useState(true)
   const [saving,     setSaving]     = useState(false)
   const [editError,  setEditError]  = useState<string | null>(null)
 
-  const openEditor = (row: ReportRow) => {
-    if (!row.group_id || !schema) return
-    // The 1978 contract values are carried on the row (outcome_1978) — bind the form from THEM so
-    // the selects show and submit the real agreed options (Part A).
-    const o = row.outcome_1978 ?? {}
+  // The schema for the round being edited: server 1978 schema, or the client 1985 mirror (1985 is
+  // never returned by getReportData — it is not the 1978 contract).
+  const editSchema: OutcomeSchema | null =
+    editing == null ? null : editing.round === '1985' ? baxter1985Schema : schema
+
+  const openEditor = (row: ReportRow, round: '1978' | '1985') => {
+    const sch = round === '1985' ? baxter1985Schema : schema
+    if (!row.group_id || !sch) return
+    // Bind the form from the row's carried contract for THAT round so the selects show and submit
+    // the real agreed options.
+    const o = (round === '1985' ? row.outcome_1985 : row.outcome_1978) ?? {}
     const vals: FormValues = {}
-    for (const f of schema) {
+    for (const f of sch) {
       const raw = (o as Record<string, unknown>)[f.key]
       vals[f.key] = f.type === 'boolean' ? Boolean(raw) : (raw == null ? '' : String(raw))
     }
     setFormValues(vals)
-    setDealReached(row.agreement_1978)
+    setDealReached(round === '1985' ? row.outcome_1985 != null : row.agreement_1978)
     setEditError(null)
-    setEditing({ groupId: row.group_id, groupNumber: row.group_number })
+    setEditing({ groupId: row.group_id, groupNumber: row.group_number, round })
   }
 
   const saveEditor = async () => {
-    if (!editing || !schema) return
+    if (!editing || !editSchema) return
     let outcome: Record<string, unknown> | null = null
     if (dealReached) {
-      const parsed = parseForm(formValues, schema)
+      const parsed = parseForm(formValues, editSchema)
       if (!parsed.ok) { setEditError(parsed.error); return }
       outcome = parsed.outcome
     }
@@ -405,11 +424,11 @@ export default function Reports() {
     setEditError(null)
     try {
       const fn = httpsCallable<
-        { groupId: string; agreement_reached: boolean; outcome: Record<string, unknown> | null },
+        { groupId: string; agreement_reached: boolean; outcome: Record<string, unknown> | null; round: '1978' | '1985' },
         { ok: boolean; rows: ReportRow[] }
       >(functions, 'updateGroupContract')
-      const res = await fn({ groupId: editing.groupId, agreement_reached: dealReached, outcome })
-      // The server rebuilds the FULL row set (cross-group 1978 no-deal base can shift), so replace
+      const res = await fn({ groupId: editing.groupId, agreement_reached: dealReached, outcome, round: editing.round })
+      // The server rebuilds the FULL row set (cross-group no-deal bases can shift), so replace
       // wholesale rather than merging by participant.
       setRows(res.data.rows)
       setEditing(null)
@@ -526,9 +545,9 @@ export default function Reports() {
 
   // Columns + title for the active report modal.
   const reportColumns =
-    activeReport === '1978' ? columns1978(openEditor, !!schema)
+    activeReport === '1978' ? columns1978(r => openEditor(r, '1978'), !!schema)
     : activeReport === '1983' ? columns1983
-    : activeReport === '1985' ? columns1985
+    : activeReport === '1985' ? columns1985(r => openEditor(r, '1985'), true)
     : []
   const reportTitle =
     activeReport === '1978' ? '1978 Report'
@@ -612,8 +631,8 @@ export default function Reports() {
         </div>
       )}
 
-      {/* ── Inline 1978 group-contract editor ── */}
-      {editing && schema && (
+      {/* ── Inline group-contract editor (round-aware: 1978 or 1985) ── */}
+      {editing && editSchema && (
         <div
           onClick={() => !saving && setEditing(null)}
           style={{
@@ -627,7 +646,7 @@ export default function Reports() {
             style={{ background: '#fff', borderRadius: 8, boxShadow: '0 8px 32px rgba(0,0,0,0.3)', width: '100%', maxWidth: 460, padding: '1.25rem 1.5rem' }}
           >
             <h3 style={{ margin: '0 0 1rem', fontSize: '1rem', fontWeight: 600 }}>
-              Edit group {editing.groupNumber ?? '—'} contract
+              Edit group {editing.groupNumber ?? '—'} — {editing.round} contract
             </h3>
             <p style={{ margin: '0 0 1rem', fontSize: '0.85rem', color: '#666' }}>
               Applies to the whole group; all members' raw scores recompute.
@@ -645,7 +664,7 @@ export default function Reports() {
             </label>
 
             <div style={{ opacity: dealReached ? 1 : 0.5 }}>
-              {schema.map(field => (
+              {editSchema.map(field => (
                 <SchemaField
                   key={field.key}
                   field={field}
