@@ -1304,6 +1304,90 @@ async function main() {
       'Part E/1985 — 1985 Report shows the six 1985 issues + "1985 score" + "TOTAL score"')
   }
 
+  // ══ Settings — 10 phase-aware Info Links (grouped by round), NO Reservation Prices ═══════════
+  banner('Settings — phase-aware Info Links (10, by round), no Reservation Prices, edit-override')
+  {
+    // The 10 configField defaults (must match gameDefinition.configFields + the real files).
+    const DEFAULTS = {
+      '1978': {
+        baxter_1978_case_url:      '/role-info/1978-baxter-case.pdf',
+        baxter_1978_worksheet_url: '/role-info/1978-baxter-worksheet.xlsx',
+        union_1978_case_url:       '/role-info/1978-union-case.pdf',
+        union_1978_worksheet_url:  '/role-info/1978-union-worksheet.xlsx',
+      },
+      '1983': {
+        baxter_1983_brief_url: '/role-info/1983-baxter-brief.pdf',
+        union_1983_brief_url:  '/role-info/1983-union-brief.pdf',
+      },
+      '1985': {
+        baxter_1985_case_url:       '/role-info/1985-baxter-case.pdf',
+        baxter_1985_scoresheet_url: '/role-info/1985-baxter-scoresheet.xlsx',
+        union_1985_case_url:        '/role-info/1985-union-case.pdf',
+        union_1985_scoresheet_url:  '/role-info/1985-union-scoresheet.xlsx',
+      },
+    }
+    const sectionTitle = r => `Info Links — ${r}`  // em-dash, matches App.tsx exactly
+
+    const settings = await (await browser.newContext()).newPage()
+    await settings.goto(`${FE}/settings?_dev_game_instance_id=${encodeURIComponent(GID)}&_session=tab`)
+    await settings.waitForSelector('h1:has-text("Settings — Baxter")', { timeout: 30_000 })
+    await settings.waitForSelector(`text=${sectionTitle('1978')}`, { timeout: 30_000 })
+
+    // NO Reservation Prices section (baked into scoring), NO bare/flat "Info Links" section.
+    assert(await settings.getByText('Reservation Prices', { exact: true }).count() === 0,
+      'Settings — Reservation Prices section REMOVED for Baxter')
+    assert(await settings.getByText('Info Links', { exact: true }).count() === 0,
+      'Settings — old flat "Info Links" section GONE (replaced by the round-grouped sections)')
+
+    // The three round sections, the 10 fields pre-filled with the correct defaults, all resolve.
+    const seenDefaults = []
+    for (const round of ['1978', '1983', '1985']) {
+      assert(await settings.getByText(sectionTitle(round), { exact: true }).count() > 0,
+        `Settings — "Info Links — ${round}" section present (grouped by round)`)
+      await settings.getByText(sectionTitle(round), { exact: true }).click()  // expand
+      const keys = Object.keys(DEFAULTS[round])
+      await settings.waitForFunction(k => {
+        const el = document.querySelector('#cfg-' + k)
+        return el && el.value && el.value.length > 0
+      }, keys[0], { timeout: 20_000 })
+      for (const [key, def] of Object.entries(DEFAULTS[round])) {
+        const val = await settings.locator('#cfg-' + key).inputValue()
+        assert(val === def, `Settings — ${round} ${key} pre-filled with default ${def} [${val}]`)
+        seenDefaults.push(def)
+      }
+      await settings.getByText(sectionTitle(round), { exact: true }).click()  // collapse
+    }
+    // The old flat keys must NOT be rendered as fields anywhere.
+    for (const oldKey of ['baxter_sheet_url', 'baxter_worksheet_url', 'union_sheet_url', 'union_worksheet_url']) {
+      assert(await settings.locator('#cfg-' + oldKey).count() === 0, `Settings — old flat field ${oldKey} REMOVED`)
+    }
+    // Every shown default resolves to a real file (no 404, not the SPA fallback).
+    for (const u of seenDefaults) {
+      const r = await fetch(`${FE}${u}`)
+      const ct = r.headers.get('content-type') ?? ''
+      assert(r.status === 200 && !ct.includes('text/html'),
+        `Settings — default resolves to a real file: ${u} [${r.status} ${ct}]`)
+    }
+
+    // Edit-override: change the 1985 Baxter case path, Save, and confirm the student is served it.
+    await settings.getByText(sectionTitle('1985'), { exact: true }).click()  // expand 1985 only
+    await settings.waitForFunction(() => {
+      const el = document.querySelector('#cfg-baxter_1985_case_url')
+      return el && el.value && el.value.length > 0
+    }, null, { timeout: 20_000 })
+    const EDITED = '/role-info/1985-baxter-case.pdf?edited=1'  // distinctive + still resolves
+    await settings.locator('#cfg-baxter_1985_case_url').fill(EDITED)
+    await settings.getByRole('button', { name: 'Save' }).click()  // only 1985 open → the one Save
+    await settings.waitForSelector('text=/Saved \\d{1,2}:\\d{2}/', { timeout: 15_000 })
+    const baxStu = students.find(s => s.role === 'baxter')
+    const served = (await stu('getInfoUrls', baxStu.pid)).links.map(l => l.url)
+    assert(served.includes(EDITED),
+      `Settings — editing baxter_1985_case_url OVERRIDES the served 1985 Baxter doc [${served.join(', ')}]`)
+    // And a non-edited 1985 doc still serves its default (edit is scoped to the one key).
+    assert(served.includes('/role-info/1985-baxter-scoresheet.xlsx'),
+      'Settings — untouched 1985 Baxter scoresheet still serves its default (edit is per-key)')
+  }
+
   banner(`RESULT — ${PASS} passed, ${FAIL} failed`)
   // Any non-throwing assertion failures still get a full page/heading/screenshot dump.
   if (FAIL > 0) await dumpDiagnostics(`${FAIL} assertion(s) failed`)
