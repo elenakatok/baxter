@@ -646,6 +646,83 @@ async function driveSaveUnchanged(reports, round) {
   await reports.getByRole('button', { name: '✕' }).click()  // close the report modal
 }
 
+// ── No-deal → deal UI coverage (the editor's PRIMARY purpose: rescuing a no-deal group) ─────────
+// A no-deal group has no stored contract, so the editor seeds every field to its DEFAULT (first
+// option / status-quo wage). The exact repro: open a no-deal group's editor, check "Deal reached",
+// leave the dropdowns at their displayed defaults, Save → must succeed (untouched fields submit
+// their real defaults, not ''). Then change ONE field → that field + the untouched defaults persist.
+// Each sub-test reloads (re-fetch) + reverts the group to no-deal so a no-deal row always remains.
+async function driveNoDealToDeal(reports, round) {
+  const enums = ISSUE_KEYS_BY_ROUND[round]
+  const outcomeOf = r => (round === '1978' ? r?.outcome_1978 : r?.outcome_1985)
+  const rowForGroup = async gnum => (await inst('getReportData')).rows.find(r => r.group_number === gnum)
+
+  const freshReport = async () => {
+    await reports.reload()
+    await reports.waitForSelector('text=/\\d+ participants? ·/', { timeout: 30_000 })  // rows loaded
+    await reports.getByText(`${round} Report`, { exact: true }).click()
+    await reports.waitForSelector(`h3:has-text("${round} Report")`, { timeout: 15_000 })
+  }
+  // Open a NO-DEAL row's editor (Notes cell == exactly "No deal") + return its group number.
+  const openNoDealEditor = async () => {
+    const row = reports.getByRole('row').filter({ has: reports.getByRole('cell', { name: 'No deal', exact: true }) }).first()
+    await row.getByRole('button', { name: 'Edit' }).click()
+    await reports.waitForSelector(`h3:has-text("${round} contract")`, { timeout: 15_000 })
+    const title = await reports.locator(`h3:has-text("${round} contract")`).innerText()
+    return parseInt(title.match(/group\s+(\d+)/i)[1], 10)
+  }
+  const shownSelectVals = async () => {
+    const out = {}
+    for (let i = 0; i < enums.length; i++) out[enums[i]] = await reports.locator('select').nth(i).inputValue()
+    return out
+  }
+  const saveClosed = async () =>
+    reports.getByRole('button', { name: 'Save', exact: true }).click()
+      .then(() => reports.waitForSelector(`h3:has-text("${round} contract")`, { state: 'detached', timeout: 15_000 }))
+      .then(() => true).catch(() => false)
+  const revertToNoDeal = async gnum => {
+    const gid = (await rowForGroup(gnum))?.group_id
+    if (gid) await inst('updateGroupContract', { groupId: gid, agreement_reached: false, round })
+  }
+  // The editor's own "Deal reached" checkbox (scoped by its label — the page has other checkboxes).
+  const dealBox = () => reports.locator('label:has-text("Deal reached") input[type="checkbox"]')
+
+  // (a) No-deal → check "Deal reached", change NOTHING, Save → succeeds with displayed defaults.
+  await freshReport()
+  const gA = await openNoDealEditor()
+  assert((await dealBox().isChecked()) === false,
+    `No-deal→deal/${round} — a no-deal group's editor opens with "Deal reached" UNCHECKED`)
+  await dealBox().check()
+  const defaultsA = await shownSelectVals()
+  const closedA = await saveClosed()
+  assert(closedA,
+    `No-deal→deal/${round} (a) — check "Deal reached" + Save with UNTOUCHED defaults SUCCEEDS (the exact repro; no "must be one of … got ''")`)
+  const afterA = outcomeOf(await rowForGroup(gA))
+  assert(afterA != null && enums.every(k => afterA[k] === defaultsA[k]) && (round === '1978' || near(afterA.wage85, 10.69)),
+    `No-deal→deal/${round} (a) — the displayed DEFAULTS persist (untouched fields saved their real defaults, not '')`)
+  await revertToNoDeal(gA)  // restore so a no-deal row remains for (b) + downstream
+
+  // (b) No-deal → check Deal reached, change ONE field, Save → that field + untouched defaults persist.
+  await freshReport()
+  const gB = await openNoDealEditor()
+  await dealBox().check()
+  const changedKey = enums[0]
+  const sel = reports.locator('select').first()  // editor's first enum select (report table has none)
+  const optVals = await sel.locator('option').evaluateAll(os => os.map(o => o.value))
+  const cur = await sel.inputValue()
+  const newVal = optVals.find(v => v && v !== cur)
+  const defaultsB = await shownSelectVals()
+  await sel.selectOption(newVal)
+  const closedB = await saveClosed()
+  assert(closedB, `No-deal→deal/${round} (b) — one-field-changed no-deal→deal Save SUCCEEDS`)
+  const afterB = outcomeOf(await rowForGroup(gB))
+  const untouched = enums.filter(k => k !== changedKey)
+  assert(afterB != null && afterB[changedKey] === newVal
+      && untouched.every(k => afterB[k] === defaultsB[k]) && (round === '1978' || near(afterB.wage85, 10.69)),
+    `No-deal→deal/${round} (b) — changed field (${changedKey}=${newVal}) saved AND all untouched DEFAULTS persist`)
+  await revertToNoDeal(gB)
+}
+
 // ── MAIN ──────────────────────────────────────────────────────────────────────
 
 async function main() {
@@ -1492,6 +1569,18 @@ async function main() {
     await reports.waitForSelector('text=/\\d+ participants? ·/', { timeout: 30_000 })  // rows loaded
     await driveSaveUnchanged(reports, '1978')
     await driveSaveUnchanged(reports, '1985')
+  }
+
+  // ══ No-deal → deal — rescue a NO-DEAL group via the editor with fields at their defaults ═══════
+  // The editor's PRIMARY purpose. No-deal groups available: 1978 = C; 1985 = C + D.
+  banner('No-deal → deal — 1978 + 1985 editors: check "Deal reached" + Save with default dropdowns')
+  {
+    const reports = await (await browser.newContext()).newPage()
+    await reports.goto(`${FE}/reports?_dev_game_instance_id=${encodeURIComponent(GID)}&_session=tab`)
+    await reports.waitForSelector('text=1978 Report', { timeout: 30_000 })
+    await reports.waitForSelector('text=/\\d+ participants? ·/', { timeout: 30_000 })
+    await driveNoDealToDeal(reports, '1978')
+    await driveNoDealToDeal(reports, '1985')
   }
 
   // ══ Settings — 10 phase-aware Info Links (grouped by round), NO Reservation Prices ═══════════

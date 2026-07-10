@@ -20,6 +20,7 @@ import {
   baxter1985Schema,
   FIELD_LABELS,
   OPTION_LABELS,
+  WAGE_DOLLARS,
   labelForOption,
   type OutcomeSchema,
 } from '../gameConfig'
@@ -142,6 +143,18 @@ const opt1985Cell = (row: ReportRow, key: string): string => {
   return o && o[key] != null ? labelForOption(key, o[key]) : '—'
 }
 const num = (n: number | null): number => (typeof n === 'number' && Number.isFinite(n) ? n : -Infinity)
+
+// Default form value for a field that has NO stored value — the case a NO-DEAL group hits (it has
+// no contract to seed from). Every control MUST start at its displayed value so an untouched field
+// submits that value, not '' (which fails schema validation — the no-deal→deal editor bug):
+//   enum → first/displayed option · decimal/integer (the wage) → the status-quo current wage
+//   text → '' (optional; blank is valid) · boolean → false
+function defaultFieldValue(field: OutcomeSchema[number]): string | boolean {
+  if (field.type === 'enum')    return field.options[0]
+  if (field.type === 'boolean') return false
+  if (field.type === 'decimal' || field.type === 'integer') return String(WAGE_DOLLARS.current)
+  return ''
+}
 
 // ── Shared leading columns (Name / Group # / Role) ──────────────────────────────
 
@@ -404,7 +417,12 @@ export default function Reports() {
     const vals: FormValues = {}
     for (const f of sch) {
       const raw = (o as Record<string, unknown>)[f.key]
-      vals[f.key] = f.type === 'boolean' ? Boolean(raw) : (raw == null ? '' : String(raw))
+      // Stored value → seed from it (dealer path, unchanged). Absent → seed the field's DEFAULT
+      // (first option / status-quo wage), NEVER '', so a no-deal group's untouched controls submit
+      // their displayed defaults instead of empty strings.
+      vals[f.key] = raw == null
+        ? defaultFieldValue(f)
+        : (f.type === 'boolean' ? Boolean(raw) : String(raw))
     }
     setFormValues(vals)
     setDealReached(round === '1985' ? row.outcome_1985 != null : row.agreement_1978)
