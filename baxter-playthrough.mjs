@@ -922,12 +922,26 @@ async function main() {
   //        then enters the 1983 code — so a student stranded on results (the Bug-A regression)
   //        would never reach the code screen and this fails loudly.
   banner('Bug A — re-route off results → day-2 re-attendance')
-  await Promise.all(students.map(s => reAttend(s.page, s.pid, code83)))
-  assert(true, 'Bug A — all completed-1978 students re-attended for 1983 (not stranded on results)')
+  // ── Part 1 (day-2 absence) — one non-lead UNION member of the 1985-dealing group (A) is a
+  // DAY-2 ABSENTEE: they finished 1978 + submitted the Likert, then NEVER re-confirm attendance
+  // for 1983/1985. Group A has 2 union members, so removing one leaves it non-degenerate. The
+  // reported bug: this absent member sat in the 1985 required-confirmation set forever, so the
+  // group reached a 1985 deal but could never commit. The fix (beginRound2 stamps 1985 presence
+  // for the present set only) must exclude them → the group commits on the present confirmations.
+  const gidA_p1 = ratifiedGids[0]
+  const partsForAbsence = await readParticipants()
+  const absentee = students.find(s => {
+    const p = partsForAbsence.find(x => x.id === s.pid)
+    return p && p.group_id === gidA_p1 && p.role === 'union' && !p.is_lead
+  })
+  assert(absentee != null, 'Part 1 setup — a non-lead union member of the 1985-dealing group (A) is the day-2 absentee')
+  const presentStudents = students.filter(s => s !== absentee)
+  await Promise.all(presentStudents.map(s => reAttend(s.page, s.pid, code83)))
+  assert(true, 'Bug A — all PRESENT completed-1978 students re-attended for 1983 (not stranded on results)')
 
   // BUG F: on round-2 pre-Begin, students see a WAITING hold with NO clickable Start button.
   banner('Bug F — pre-Begin waiting state, no Start button')
-  await Promise.all(students.map(async s => {
+  await Promise.all(presentStudents.map(async s => {
     await s.page.waitForSelector('h1:has-text("checked in")', { timeout: 30_000 })
     const startVisible = await s.page.locator('button:has-text("Start negotiation")').isVisible().catch(() => false)
     assert(!startVisible, `Bug F — ${s.pid}: NO "Start negotiation" button before Begin 1983`)
@@ -940,11 +954,39 @@ async function main() {
   await dash.click('button:has-text("Begin 1983")')
   log('instr', 'clicked "Begin 1983" (re-opens groups → negotiating)')
 
+  // ── Part 1 — the absence-cutoff (beginRound2) must carry the PRESENT set forward to 1985 so the
+  // 1985 required-confirmation set excludes the day-2 absentee. Assert the presence bookkeeping:
+  // the absentee has NO 1983 presence (they never re-confirmed), while present group-A members now
+  // carry a STAMPED 1985 presence (attendance_by_round.1985) — the fix that lets 1985 commit without them.
+  {
+    const has1985 = async pid => {
+      const f = await readParticipantFields(pid)
+      return f.attendance_by_round?.mapValue?.fields?.['1985'] != null
+    }
+    const has1983 = async pid => {
+      const f = await readParticipantFields(pid)
+      return f.attendance_by_round?.mapValue?.fields?.['1983'] != null
+    }
+    // "Begin 1983" runs beginRound2 server-side async — poll until it commits (present group-A
+    // members gain the stamped 1985 presence) before asserting the presence bookkeeping.
+    const presentA = presentStudents.filter(s => partsForAbsence.find(x => x.id === s.pid)?.group_id === gidA_p1)
+    let stamped = []
+    for (let i = 0; i < 20; i++) {
+      stamped = await Promise.all(presentA.map(s => has1985(s.pid)))
+      if (presentA.length > 0 && stamped.every(Boolean)) break
+      await sleep(1000)
+    }
+    assert(presentA.length > 0 && stamped.every(Boolean),
+      'Part 1 — beginRound2 STAMPS 1985 presence for every PRESENT group-A member (day-2 present set carried to 1985)')
+    assert(!(await has1983(absentee.pid)) && !(await has1985(absentee.pid)),
+      'Part 1 — day-2 absentee has NO 1983 AND NO 1985 presence (correctly excluded from the active roster)')
+  }
+
   // BUG F (resume): the hold advances into the 1983 negotiation once the group is re-opened.
-  await Promise.all(students.map(async s => {
+  await Promise.all(presentStudents.map(async s => {
     await s.page.waitForSelector('h1:has-text("Go negotiate")', { timeout: 30_000 })
   }))
-  assert(true, 'Bug F — students advance into the 1983 negotiation after Begin 1983')
+  assert(true, 'Bug F — present students advance into the 1983 negotiation after Begin 1983')
 
   await dash.reload(); await sleep(2500)
   {
@@ -962,8 +1004,8 @@ async function main() {
 
   // ── Slice 3 + 1983 redo-loop: A redo→deal a wage, B no-deals, C (rejecter) idle ──
   banner('1983 negotiation — group A redo→deal a wage, group B no-deals')
-  // Everyone taps "We've finished" to reach the 1983 report / confirm screens.
-  await Promise.all(students.map(s => s.page.click("button:has-text(\"We've finished\")").catch(() => {})))
+  // Everyone (present) taps "We've finished" to reach the 1983 report / confirm screens.
+  await Promise.all(presentStudents.map(s => s.page.click("button:has-text(\"We've finished\")").catch(() => {})))
 
   const parts83 = await readParticipants()
   const groups83 = groupStudents(students, parts83)
@@ -976,6 +1018,9 @@ async function main() {
   // STANDARD ACCEPT/REDO loop (unchanged — 1983 is NOT ultimatum): first offer $9.50 is
   // REJECTED → the round RESETS (lead re-reports) → re-offer $9.50 → all accept → deal.
   const gA = groups83[gidA]; const leadA = gA.find(m => m.is_lead) ?? gA[0]; const nonA = gA.filter(m => m !== leadA)
+  // Part 1 — group A carries the day-2 absentee: drive the 1983 accept/redo loop over the PRESENT
+  // non-leads only (the absentee is not in 1983's presence-filtered required set, so it never blocks).
+  const presentNonA = nonA.filter(m => m.pid !== absentee.pid)
   await leadA.page.waitForSelector('h1:has-text("Report outcome")', { timeout: 30_000 })
   {
     const selectCount = await leadA.page.locator('select').count()
@@ -988,13 +1033,13 @@ async function main() {
   await leadA.page.click('button:has-text("Review & submit")')
   await leadA.page.waitForSelector('h1:has-text("Confirm outcome")', { timeout: 10_000 })
   await leadA.page.click('button:has-text("Yes, submit")')
-  await nonA[0].page.waitForSelector('h1:has-text("Confirm")', { timeout: 30_000 })
+  await presentNonA[0].page.waitForSelector('h1:has-text("Confirm")', { timeout: 30_000 })
   // Fix 2 — reject is confirm-gated in 1983 too, but here it is NON-terminal (accept/redo loop):
   // the confirm copy says the outcome goes back to the lead, and confirming triggers the redo.
-  await nonA[0].page.click('button:has-text("Reject")')
-  await nonA[0].page.waitForSelector('h1:has-text("Are you sure")', { timeout: 10_000 })
+  await presentNonA[0].page.click('button:has-text("Reject")')
+  await presentNonA[0].page.waitForSelector('h1:has-text("Are you sure")', { timeout: 10_000 })
   assert(true, 'Fix 2 — 1983 Reject is confirm-gated (non-terminal: confirm sends the outcome back to the lead)')
-  await nonA[0].page.click('button:has-text("Yes, reject")')
+  await presentNonA[0].page.click('button:has-text("Yes, reject")')
   // 1983 stays on the accept/REDO loop → reject RESETS: the lead is sent back to re-report.
   const redoOffered = await leadA.page.waitForSelector('h1:has-text("Report outcome")', { timeout: 20_000 })
     .then(() => true).catch(() => false)
@@ -1005,7 +1050,7 @@ async function main() {
   await leadA.page.click('button:has-text("Review & submit")')
   await leadA.page.waitForSelector('h1:has-text("Confirm outcome")', { timeout: 10_000 })
   await leadA.page.click('button:has-text("Yes, submit")')
-  await Promise.all(nonA.map(async s => {
+  await Promise.all(presentNonA.map(async s => {
     await s.page.waitForSelector('h1:has-text("Confirm")', { timeout: 30_000 })
     await s.page.click('button:has-text("Confirm")')
   }))
@@ -1183,8 +1228,8 @@ async function main() {
   // carries forward so students flow straight into 1985 with no re-attendance).
   const adv = await inst('advanceRound')
   log('instr', `advanceRound → round ${adv.current_round} (${adv.round_id})`)
-  await Promise.all(students.map(s => s.page.waitForSelector('h1:has-text("Go negotiate")', { timeout: 30_000 })))
-  assert(adv.round_id === '1985', 'Proceed — advanceRound moved the class to 1985 (students re-flow into the negotiation)')
+  await Promise.all(presentStudents.map(s => s.page.waitForSelector('h1:has-text("Go negotiate")', { timeout: 30_000 })))
+  assert(adv.round_id === '1985', 'Proceed — advanceRound moved the class to 1985 (present students re-flow into the negotiation)')
 
   // ── Phase-aware role-info: 1985 (current_round=2) — incl. the self-scoring sheets + header update ──
   {
@@ -1200,8 +1245,8 @@ async function main() {
     assert(!h1985.some(h => h && (h.includes('1978-') || h.includes('1983-'))),
       'Role-info header — the header no longer shows the earlier rounds\' docs (links swapped, not appended)')
   }
-  // Everyone taps "We've finished" to reach the 1985 report / confirm screens.
-  await Promise.all(students.map(s => s.page.click("button:has-text(\"We've finished\")").catch(() => {})))
+  // Everyone (present) taps "We've finished" to reach the 1985 report / confirm screens.
+  await Promise.all(presentStudents.map(s => s.page.click("button:has-text(\"We've finished\")").catch(() => {})))
 
   const parts85 = await readParticipants()
   const groups85 = groupStudents(students, parts85)
@@ -1285,19 +1330,33 @@ async function main() {
   }
 
   // Group A DEALS 1985 (Deal B → Baxter 97.95, Union 9.55). One dealer now exists.
+  // Part 1 — group A still carries the day-2 absentee. Only the PRESENT non-leads confirm; the
+  // absentee never re-attended so it is not in the 1985 required-confirmation set. BEFORE the fix
+  // this group would hang at "all present confirmed but not committed" (the absentee stuck the set).
   const gA85 = groups85[gidA]; const leadA85 = gA85.find(m => m.is_lead) ?? gA85[0]; const nonA85 = gA85.filter(m => m !== leadA85)
+  const presentNonA85 = nonA85.filter(m => m.pid !== absentee.pid)
+  assert(nonA85.some(m => m.pid === absentee.pid) && presentNonA85.length === nonA85.length - 1,
+    'Part 1 — the day-2 absentee is STILL a roster member of the 1985-dealing group A (present non-leads are one fewer)')
   await fill1985(leadA85.page, DEAL_B_1985)
   await leadA85.page.click('button:has-text("Review & submit")')
   await leadA85.page.waitForSelector('h1:has-text("Confirm outcome")', { timeout: 10_000 })
   await leadA85.page.click('button:has-text("Yes, submit")')
-  await Promise.all(nonA85.map(async s => {
+  await Promise.all(presentNonA85.map(async s => {
     await s.page.waitForSelector('h1:has-text("Confirm")', { timeout: 30_000 })
     await s.page.click('button:has-text("Confirm")')
   }))
   {
+    // Part 1 — the group COMMITS on the present confirmations alone (status completed + wage85
+    // stored) even though the absentee never confirmed. This is the core fix: a day-2-absent
+    // member no longer blocks round completion.
     const gs = await pollGroupsFull(g => { const a = g.find(x => x.id === gidA); return a?.status === 'completed' && a?.wage85 != null }, 30_000)
     assert(near(gs.find(x => x.id === gidA)?.wage85, 9.00),
       '1985 six-issue form SUBMITS — group A wage85 = $9.00 stored (continuous, server-validated)')
+    assert(gs.find(x => x.id === gidA)?.status === 'completed',
+      'Part 1 — group A COMPLETES 1985 on the PRESENT confirmations alone; the day-2 absentee did NOT block round completion')
+    const absF = await readParticipantFields(absentee.pid)
+    assert(absF.attendance_by_round?.mapValue?.fields?.['1985'] == null,
+      'Part 1 — the absentee never gained 1985 presence, yet the group still committed (excluded, not silently marked present)')
   }
 
   // NORMAL pass — re-score with one dealer (A). final raw = adjusted-1978 + 1985.
@@ -1315,6 +1374,11 @@ async function main() {
       'Additive final — group A Baxter = adjusted-1978 80.4 + 1985 deal 97.95 = 178.35 (score matches gate)')
     assert(all(raws(gidA, 'union'), 52.85),
       'Additive final — group A Union = adjusted-1978 43.3 + 1985 deal 9.55 = 52.85')
+    // Part 1 — the day-2 ABSENTEE is a group-A union member: it is scored WITH the committed deal
+    // (52.85), not dropped to a no-show floor. Proves the group both completed AND scored the deal.
+    const absRaw = parts.find(p => p.id === absentee.pid)?.raw_score
+    assert(near(absRaw, 52.85, 0.1),
+      `Part 1 — the day-2 absentee is scored with group A's committed 1985 deal (raw 52.85) [got ${absRaw}]`)
     // Union no-deal still 60: group B Union = adjusted 36.2 + 60 = 96.2.
     assert(all(raws(gidB, 'union'), 96.2),
       '1985 Union no-deal = 60 — group B Union = adjusted-1978 36.2 + 60 = 96.2')
@@ -1398,6 +1462,16 @@ async function main() {
     assert(cRows.length > 0 && cRows.every(r => near(r.wage_1978, 10.69) && r.agreement_1978 === false),
       `Part B — 1978-no-deal group shows wage $10.69 + "No deal" in the 1978 report [${cRows.map(r => r.wage_1978).join(',')}]`)
 
+    // Parts 3.8 + 3.9 — the FAILED-RATIFICATION dealer (D: reached a 1978 DEAL with wages=above_top3
+    // [$12.69 nominal] but Transfer=Some → NOT ratified). The deal is void, so the report must show
+    // it as a NO-DEAL: agreement reached but NOT ratified, and its EFFECTIVE 1978 wage is the $10.69
+    // status quo (NOT the nominal $12.69 the dead contract named).
+    const dRows = rows.filter(r => r.group_id === failRatifyGid)
+    assert(dRows.length > 0 && dRows.every(r => r.agreement_1978 === true && r.ratified_1978 === false),
+      'Part 3.8 — failed-ratification group: agreement reached (true) but NOT ratified (false)')
+    assert(dRows.length > 0 && dRows.every(r => near(r.wage_1978, 10.69)),
+      `Part 3.9 — failed-ratification 1978 wage = $10.69 status quo, NOT the nominal $12.69 [${dRows.map(r => r.wage_1978).join(',')}]`)
+
     // Part E/1978 — a ratified dealer (group A) carries its agreed options + $11.69 wage + score 85.
     const aBax = rows.find(r => r.group_id === gidA && r.role === 'baxter')
     assert(aBax && aBax.outcome_1978 && aBax.outcome_1978.location === 'deloitte' && aBax.outcome_1978.transfer === 'most',
@@ -1454,6 +1528,11 @@ async function main() {
     assert(await reports.locator('td:has-text("Baxter Management")').count() > 0
         && await reports.locator('td:has-text("Local 190")').count() > 0,
       'Part E — roles render as Baxter Management / Local 190 (not Winemaster / Home Base)')
+
+    // Part 3.8 (rendered) — the failed-ratification group's Notes cell reads "No deal (failed
+    // ratification)", NOT "Deal" (the deal is void). The distinct third label must appear in the table.
+    assert(await reports.locator('td:has-text("No deal (failed ratification)")').count() > 0,
+      'Part 3.8 (rendered) — 1978 Report Notes shows "No deal (failed ratification)" for the void deal (not "Deal")')
 
     // Part A — edit the first row's (group 1 = ratified dealer A) 1978 contract. The form MUST be
     // POPULATED from the agreed outcome (the bug: selects came up blank → Save sent empty strings).

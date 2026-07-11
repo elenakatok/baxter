@@ -22,6 +22,7 @@ import {
   clampRoundIndex,
   resolveRoundSlot,
   presenceAtSlot,
+  setRoundPresence,
   reopenGroupPatch,
 } from '@mygames/game-server'
 import { baxterGameDef } from './gameDefinition'
@@ -32,6 +33,7 @@ const ROLE_KEYS = baxterGameDef.roles.roles.map((r) => r.key)
 const ROUNDS = baxterGameDef.rounds ?? []
 const IDX_1978 = ROUNDS.indexOf('1978')
 const IDX_1983 = ROUNDS.indexOf('1983')
+const IDX_1985 = ROUNDS.indexOf('1985')
 
 /**
  * Button 1 — "Open Round 2 Attendance". Advances the class from 1978 to 1983 by bumping the
@@ -182,6 +184,21 @@ export const beginRound2 = onCall({ cors: CORS }, async (request) => {
         batch.update(g.ref, reopenGroupPatch())
         openedCount++
         summary.push({ group_id: g.id, action: 'reopened' })
+      }
+    }
+
+    // Carry the day-2 present set forward to 1985. There is NO separate 1985 re-attendance
+    // step (1983→1985 uses the generic advanceRound, which does not stamp presence), so the
+    // 1983 present set IS the active roster for the rest of the session. Stamping the 1985
+    // keyed slot here means submitLeadOutcome's presence filter finds the present set for 1985
+    // and excludes anyone absent for day 2. Without it, 1985 has no presence records at all,
+    // the filter falls back to the full non-lead set, and a single day-2-absent member sits
+    // in the required-confirmation set forever — the group reaches a deal but can never commit.
+    if (IDX_1985 >= 0) {
+      const slot1985 = resolveRoundSlot(ROUNDS, IDX_1985)
+      const present1985 = FieldValue.serverTimestamp()
+      for (const pid of presentIds) {
+        batch.update(instanceRef.collection('participants').doc(pid), setRoundPresence(slot1985, present1985))
       }
     }
 

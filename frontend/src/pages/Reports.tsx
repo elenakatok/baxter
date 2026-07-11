@@ -110,6 +110,7 @@ type ReportRow = {
   // 1978
   outcome_1978: Record<string, unknown> | null
   agreement_1978: boolean
+  ratified_1978: boolean
   wage_1978: number
   score_1978: number | null
   notes: string | null
@@ -213,8 +214,10 @@ function columns1978(onEdit: (r: ReportRow) => void, canEdit: boolean): Sortable
     },
     {
       key: 'notes78', label: 'Notes',
-      render: r => r.agreement_1978 ? 'Deal' : 'No deal',
-      compare: (a, b) => Number(a.agreement_1978) - Number(b.agreement_1978),
+      // A reached-but-unratified 1978 deal is void — it scores AND reads as a no-deal, so the
+      // Notes must not say "Deal" (Part 3.8). Three-way: no deal / failed ratification / deal.
+      render: r => !r.agreement_1978 ? 'No deal' : (r.ratified_1978 ? 'Deal' : 'No deal (failed ratification)'),
+      compare: (a, b) => Number(a.agreement_1978 && a.ratified_1978) - Number(b.agreement_1978 && b.ratified_1978),
     },
     editCol(onEdit, canEdit),
   ]

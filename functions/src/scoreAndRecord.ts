@@ -16,7 +16,7 @@ import {
   type PushSummary,
 } from '@mygames/game-server'
 import { baxterGameDef } from './gameDefinition'
-import { wage78FromOutcome, wage83FromOutcome, classAvg1983, adjustmentPct, type BaxterRole } from './transform1983'
+import { effectiveWage78, wage83FromOutcome, classAvg1983, adjustmentPct, type BaxterRole } from './transform1983'
 import { score1985, baxterNoDeal1985, UNION_1985_NO_DEAL } from './score1985'
 import { isRatified1978, baxterNoDeal1978 } from './ratification1978'
 import { terminalZByRole, type FinalRaw } from './terminalScore'
@@ -115,7 +115,9 @@ export const scoreAndRecord = onCall({ cors: def.corsOrigins, secrets: [classroo
     for (const gdoc of groupsSnap.docs) {
       const d = gdoc.data()
       const w83 = IDX_1983 >= 0 ? wage83FromOutcome(getRoundOutcome(d, slot1983)) : null
-      groupWages.set(gdoc.id, { w78: wage78FromOutcome(d['outcome'] as Record<string, unknown> | null), w83 })
+      // effectiveWage78: a FAILED-ratification 1978 deal is void → its 1983 Union adjustment is
+      // taken against the $10.69 status quo, not the nominal wage of the dead contract (Part 3.9).
+      groupWages.set(gdoc.id, { w78: effectiveWage78(d['outcome'] as Record<string, unknown> | null), w83 })
     }
     const w83Avg = classAvg1983([...groupWages.values()].map(g => g.w83))
     const currentIdx = clampRoundIndex((def.rounds ?? []).length, instanceSnap.data()?.['current_round'])

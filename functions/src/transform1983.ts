@@ -16,6 +16,7 @@
  *   1983 wage HIGHER than the reference → Baxter −, Union +
  *   Adjusted-1978 = 1978 score ± adjustment.
  */
+import { isRatified1978 } from './ratification1978'
 
 /** 1978 `wages` enum option → the hourly dollar figure shown in its UI label (gameConfig). */
 export const WAGE_DOLLARS: Readonly<Record<string, number>> = {
@@ -40,6 +41,30 @@ export const STATUS_QUO_WAGE_1978 = WAGE_DOLLARS.current  // 10.69
 /** The group's 1978 wage with the no-deal status-quo fallback ($10.69). Never null. */
 export function wage78OrStatusQuo(outcome: Record<string, unknown> | null | undefined): number {
   return wage78FromOutcome(outcome) ?? STATUS_QUO_WAGE_1978
+}
+
+/**
+ * The 1978 wage that actually TOOK EFFECT — ratification-aware (spec §3 / Part 3.9). A 1978 deal
+ * only takes effect if it RATIFIED (Deloitte + Transfer≥Most); a deal that FAILED ratification is
+ * void, so the group keeps the status-quo contract and its effective 1978 wage is $10.69 — NOT the
+ * nominal wage the dead contract named. This is what the Union adjustment denominator (w78) reads.
+ *
+ * Ratified deal   → the negotiated option wage.
+ * Failed-ratify   → $10.69 (status quo).
+ * Explicit no-deal (null outcome) → null — UNCHANGED from wage78FromOutcome, so a group that never
+ *   reached a 1978 deal keeps its existing adjustment behaviour (no Union adjustment). Only the
+ *   failed-ratification case moves off the nominal wage.
+ * `wage78FromOutcome` stays the FROZEN-gate nominal-wage reader — do not change it.
+ */
+export function effectiveWage78(outcome: Record<string, unknown> | null | undefined): number | null {
+  if (outcome == null) return null
+  return isRatified1978(outcome) ? wage78FromOutcome(outcome) : STATUS_QUO_WAGE_1978
+}
+
+/** effectiveWage78 with the status-quo fallback ($10.69) — never null. For DISPLAY + arbitration
+ *  reference: ratified → option wage; failed-ratify OR no-deal → $10.69. */
+export function effectiveWage78OrStatusQuo(outcome: Record<string, unknown> | null | undefined): number {
+  return effectiveWage78(outcome) ?? STATUS_QUO_WAGE_1978
 }
 
 /** Field key holding the continuous 1983 wage inside the round-2 outcome object. */

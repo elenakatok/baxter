@@ -24,7 +24,7 @@ import {
 } from '@mygames/game-server'
 import { baxterGameDef } from './gameDefinition'
 import { resolveArbitration as drawArbitration } from './arbitration'
-import { wage78OrStatusQuo, wage83FromOutcome, WAGE83_FIELD } from './transform1983'
+import { effectiveWage78OrStatusQuo, wage83FromOutcome, WAGE83_FIELD } from './transform1983'
 
 const CORS = baxterGameDef.corsOrigins
 const ROUNDS = baxterGameDef.rounds ?? []
@@ -69,10 +69,11 @@ export const resolveArbitration = onCall({ cors: CORS }, async (request) => {
       throw new HttpsError('failed-precondition', 'This group has not finished 1983 yet.')
     }
 
-    // The Union branch pays the group's OWN 1978 wage. A group that reached NO 1978 deal keeps the
-    // status-quo contract, so its 1978 wage is $10.69 (Part B) — every group now always has a 1978
-    // wage, so arbitration never blocks on "resolve 1978 first".
-    const w78 = wage78OrStatusQuo(gdata['outcome'] as Record<string, unknown> | null)
+    // The Union branch pays the group's OWN effective 1978 wage. A group that reached NO 1978 deal —
+    // OR one whose deal FAILED ratification (Part 3.9) — keeps the status-quo contract, so its 1978
+    // wage is $10.69; a ratified deal pays its negotiated wage. Every group always has a 1978 wage,
+    // so arbitration never blocks on "resolve 1978 first".
+    const w78 = effectiveWage78OrStatusQuo(gdata['outcome'] as Record<string, unknown> | null)
 
     // Seed: fixed (deterministic) from the emulator harness; crypto-random at click in prod.
     const seed = (isEmulator && typeof data['seed'] === 'number')

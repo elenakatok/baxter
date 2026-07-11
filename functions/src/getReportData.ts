@@ -9,7 +9,7 @@ import {
 } from '@mygames/game-server'
 import { computeRawScore, baxterGameDef } from './gameDefinition'
 import { isRatified1978, baxterNoDeal1978 } from './ratification1978'
-import { wage78FromOutcome, wage78OrStatusQuo, wage83FromOutcome, classAvg1983, adjustmentPct, type BaxterRole } from './transform1983'
+import { effectiveWage78, effectiveWage78OrStatusQuo, wage83FromOutcome, classAvg1983, adjustmentPct, type BaxterRole } from './transform1983'
 import { score1985, baxterNoDeal1985, UNION_1985_NO_DEAL } from './score1985'
 
 // Exported so updateGroupContract can build identical rows without duplicating these.
@@ -73,7 +73,11 @@ export type ReportRow = {
   outcome_1978: Record<string, unknown> | null
   /** Whether the group reached a 1978 deal (Notes: Deal / No deal). */
   agreement_1978: boolean
-  /** The group's 1978 wage — negotiated, or the $10.69 status-quo for a no-deal group (Part B). */
+  /** Whether the 1978 deal RATIFIED (Deloitte + Transfer≥Most). A reached-but-unratified deal is
+   *  scored/displayed as a no-deal ("No deal (failed ratification)"). false when no deal reached. */
+  ratified_1978: boolean
+  /** The group's 1978 wage — negotiated, or the $10.69 status-quo for a no-deal OR failed-ratify
+   *  group (Part B / Part 3.9: a void contract keeps the current wage). */
   wage_1978: number
   /** The 1978 base score (ratified deal sum, or the 1978 no-deal value). */
   score_1978: number | null
@@ -150,8 +154,8 @@ export async function buildReportRows(
     groupInfo.set(gdoc.id, {
       outcome1978,
       ratified: isRatified1978(outcome1978),
-      w78: wage78FromOutcome(outcome1978),
-      wage78Display: wage78OrStatusQuo(outcome1978),
+      w78: effectiveWage78(outcome1978),
+      wage78Display: effectiveWage78OrStatusQuo(outcome1978),
       w83: IDX_1983 >= 0 ? wage83FromOutcome(getRoundOutcome(d, slot1983)) : null,
       arb,
       outcome1985: IDX_1985 >= 0 ? getRoundOutcome(d, slot1985) : null,
@@ -238,7 +242,8 @@ export async function buildReportRows(
       likert_answers,
       outcome_1978: outcome1978,
       agreement_1978: outcome1978 != null,
-      wage_1978: gi?.wage78Display ?? wage78OrStatusQuo(null),
+      ratified_1978: ratified,
+      wage_1978: gi?.wage78Display ?? effectiveWage78OrStatusQuo(null),
       score_1978,
       notes: outcome1978 ? ((outcome1978['notes'] as string | undefined) ?? null) : null,
       wage_1983: w83 ?? (gi?.arb ? gi.arb.wage : null),
