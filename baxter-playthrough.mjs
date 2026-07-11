@@ -818,6 +818,18 @@ async function main() {
   // 4. 1978 negotiation → 2 ratified dealers (A,B), 1 rejecter (C), 1 failed-ratify dealer (D).
   const { ratifiedGids, failRatifyGid, rejectGid, dealerMemberPids } = await drive1978Negotiation(students)
 
+  // ── Part 2 — per-round REPORTING side (Baxter-local lead reassignment) ──────────────────────
+  // 1978 reporter = Baxter Management: the lead assigned at matching (first role) reports; Local
+  // confirms. (1983/1985 flip to Local at Begin 1983 — asserted in those sections below.)
+  {
+    const p1978 = await readParticipants()
+    for (const gid of [...ratifiedGids, failRatifyGid, rejectGid]) {
+      const lead = p1978.find(x => x.group_id === gid && x.is_lead)
+      assert(lead?.role === 'baxter',
+        `Part 2 — 1978 reporter is Baxter Management (group ${gid} lead is a Baxter member)`)
+    }
+  }
+
   // ── Slice 7: between-rounds "Looking ahead to 1985" Likert set (after 1978, before 1983) ──
   banner('Slice 7 — Looking-ahead Likert (after 1978, before 1983)')
   {
@@ -1018,9 +1030,19 @@ async function main() {
   // STANDARD ACCEPT/REDO loop (unchanged — 1983 is NOT ultimatum): first offer $9.50 is
   // REJECTED → the round RESETS (lead re-reports) → re-offer $9.50 → all accept → deal.
   const gA = groups83[gidA]; const leadA = gA.find(m => m.is_lead) ?? gA[0]; const nonA = gA.filter(m => m !== leadA)
+  // Part 2 — 1983 reporting side FLIPPED to Local 190 at "Begin 1983" (beginRound2 reassigned the
+  // group lead from the Baxter side to a present Local member). The Local lead reports; Baxter confirms.
+  assert(leadA.role === 'union',
+    `Part 2 — 1983 reporter is Local 190 (lead flipped to the Local side at Begin 1983) [lead role=${leadA.role}]`)
+  // Part 2 + day-2 absence — the day-2-absent Local member is NOT the promoted lead; a PRESENT Local
+  // partner was promoted instead (reassignment applied to the new reporting side).
+  assert(leadA.pid !== absentee.pid,
+    'Part 2 + day-2 absence — the absent Local member was NOT made lead; a present Local partner was promoted')
   // Part 1 — group A carries the day-2 absentee: drive the 1983 accept/redo loop over the PRESENT
   // non-leads only (the absentee is not in 1983's presence-filtered required set, so it never blocks).
   const presentNonA = nonA.filter(m => m.pid !== absentee.pid)
+  assert(presentNonA.some(m => m.role === 'baxter'),
+    'Part 2 — 1983 Baxter Management side CONFIRMS (present non-lead includes a Baxter member)')
   await leadA.page.waitForSelector('h1:has-text("Report outcome")', { timeout: 30_000 })
   {
     const selectCount = await leadA.page.locator('select').count()
@@ -1334,7 +1356,13 @@ async function main() {
   // absentee never re-attended so it is not in the 1985 required-confirmation set. BEFORE the fix
   // this group would hang at "all present confirmed but not committed" (the absentee stuck the set).
   const gA85 = groups85[gidA]; const leadA85 = gA85.find(m => m.is_lead) ?? gA85[0]; const nonA85 = gA85.filter(m => m !== leadA85)
+  // Part 2 — 1985 reporter is STILL Local 190: advanceRound (1983→1985) preserves the lead flag, so
+  // the Local lead set at Begin 1983 carries into 1985 with no extra reassignment. Baxter confirms.
+  assert(leadA85.role === 'union',
+    `Part 2 — 1985 reporter is Local 190 (Local lead carried forward by advanceRound) [lead role=${leadA85.role}]`)
   const presentNonA85 = nonA85.filter(m => m.pid !== absentee.pid)
+  assert(presentNonA85.some(m => m.role === 'baxter'),
+    'Part 2 — 1985 Baxter Management side CONFIRMS (present non-lead includes a Baxter member)')
   assert(nonA85.some(m => m.pid === absentee.pid) && presentNonA85.length === nonA85.length - 1,
     'Part 1 — the day-2 absentee is STILL a roster member of the 1985-dealing group A (present non-leads are one fewer)')
   await fill1985(leadA85.page, DEAL_B_1985)

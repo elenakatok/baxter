@@ -15,12 +15,14 @@ const ROLES = ['baxter', 'union'] as const
 const members = { baxter: ['b1', 'b2'], union: ['u1', 'u2'] }
 const present = (...ids: string[]) => new Set(ids)
 
-/** Reproduces beginRound2's post-loop counting + guard predicate over a set of groups. */
+/** Reproduces beginRound2's post-loop counting + guard predicate over a set of groups. The guard
+ *  counts opened (normal | reassign) vs degenerate; it is REPORTER-AGNOSTIC — moving the lead to
+ *  the reporting side is still an "opened" outcome. Uses the real 1983 reporter ('union'). */
 function guardFires(groups: Array<{ present: Set<string>; lead: string }>): boolean {
   let opened = 0
   let degenerate = 0
   for (const g of groups) {
-    const action: Day2GroupAction = decideGroupDay2(ROLES, members, g.present, g.lead)
+    const action: Day2GroupAction = decideGroupDay2(ROLES, members, g.present, g.lead, 'union')
     if (action.kind === 'degenerate') degenerate++
     else opened++ // normal | reassign
   }
@@ -42,7 +44,7 @@ describe('beginRound2 all-absent guard', () => {
 
   it('does NOT fire when at least one group can be opened (mixed) → commit proceeds', () => {
     expect(guardFires([
-      { present: present('b1', 'u1'), lead: 'b1' }, // normal → opened
+      { present: present('b1', 'u1'), lead: 'b1' }, // both sides present → reassign to union → opened
       { present: present('b1'),       lead: 'b1' }, // union absent → degenerate
     ])).toBe(false)
   })

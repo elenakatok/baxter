@@ -1,7 +1,8 @@
 import { describe, it, expect } from 'vitest'
 import { decideGroupDay2 } from '../src/day2Attendance'
 
-// A Baxter group: 2 baxter + 2 union; one is the lead. Round-2 presence decides the action.
+// A Baxter group: 2 baxter + 2 union; one is the lead. Round-2 presence + the round's reporting
+// role decide the action. The lead this round must be a PRESENT member of `reporterRole`.
 const ROLES = ['baxter', 'union'] as const
 const members = {
   baxter: ['b1', 'b2'],
@@ -9,64 +10,59 @@ const members = {
 }
 const present = (...ids: string[]) => new Set(ids)
 
-describe('decideGroupDay2 — (a) NORMAL', () => {
-  it('all four present, lead present → normal, no re-assignment', () => {
-    const action = decideGroupDay2(ROLES, members, present('b1', 'b2', 'u1', 'u2'), 'b1')
+describe('decideGroupDay2 — (a) NORMAL (lead already the present reporter-role member)', () => {
+  it('reporter=baxter, baxter lead present → normal, no re-assignment', () => {
+    const action = decideGroupDay2(ROLES, members, present('b1', 'b2', 'u1', 'u2'), 'b1', 'baxter')
     expect(action).toEqual({ kind: 'normal' })
   })
 
-  it('each role has one present, and the lead is among the present → normal', () => {
-    // b1 (lead) present, b2 absent, u1 present, u2 absent — every role still represented.
-    const action = decideGroupDay2(ROLES, members, present('b1', 'u1'), 'b1')
-    expect(action).toEqual({ kind: 'normal' })
-  })
-
-  it('lead is in the non-first role and present → normal', () => {
-    const action = decideGroupDay2(ROLES, members, present('b2', 'u2'), 'u2')
+  it('reporter=union, union lead present → normal', () => {
+    const action = decideGroupDay2(ROLES, members, present('b1', 'u2'), 'u2', 'union')
     expect(action).toEqual({ kind: 'normal' })
   })
 })
 
-describe('decideGroupDay2 — (b) REASSIGN', () => {
-  it('lead absent, same-role partner present, other role present → promote partner', () => {
-    // b1 (lead) absent, b2 present, u1 present.
-    const action = decideGroupDay2(ROLES, members, present('b2', 'u1'), 'b1')
-    expect(action).toEqual({ kind: 'reassign', oldLeadId: 'b1', newLeadId: 'b2' })
+describe('decideGroupDay2 — (b) REASSIGN to the reporting role', () => {
+  it('Baxter 1983/1985: reporter=union, current lead is baxter → flip to a present union member', () => {
+    // The canonical rotation: 1978 lead is Baxter (b1); cutting into 1983 the reporter is Local.
+    const action = decideGroupDay2(ROLES, members, present('b1', 'b2', 'u1', 'u2'), 'b1', 'union')
+    expect(action).toEqual({ kind: 'reassign', oldLeadId: 'b1', newLeadId: 'u1' })
   })
 
-  it('lead in the union role absent, union partner present → promote union partner', () => {
-    const action = decideGroupDay2(ROLES, members, present('b1', 'u1'), 'u2')
+  it('reporter=union, baxter lead, first union member ABSENT → promote the present union partner', () => {
+    // u1 absent, u2 present → the present Local partner leads (day-2-absence on the reporting side).
+    const action = decideGroupDay2(ROLES, members, present('b1', 'u2'), 'b1', 'union')
+    expect(action).toEqual({ kind: 'reassign', oldLeadId: 'b1', newLeadId: 'u2' })
+  })
+
+  it('reporter=union, current union lead ABSENT → promote the present union partner', () => {
+    const action = decideGroupDay2(ROLES, members, present('b1', 'u1'), 'u2', 'union')
     expect(action).toEqual({ kind: 'reassign', oldLeadId: 'u2', newLeadId: 'u1' })
   })
 
-  it('promotes a deterministic present same-role partner (first in member order)', () => {
-    const wide = { baxter: ['b1', 'b2', 'b3'], union: ['u1'] }
-    // lead b1 absent; b2 absent; b3 present → promote b3.
-    const action = decideGroupDay2(ROLES, wide, present('b3', 'u1'), 'b1')
-    expect(action).toEqual({ kind: 'reassign', oldLeadId: 'b1', newLeadId: 'b3' })
+  it('promotes a deterministic present reporter-role member (first in member order)', () => {
+    const wide = { baxter: ['b1'], union: ['u1', 'u2', 'u3'] }
+    // reporter=union; u1 absent, u2 present → promote u2 (first present in order).
+    const action = decideGroupDay2(ROLES, wide, present('b1', 'u2', 'u3'), 'b1', 'union')
+    expect(action).toEqual({ kind: 'reassign', oldLeadId: 'b1', newLeadId: 'u2' })
   })
 })
 
-describe('decideGroupDay2 — (c) DEGENERATE', () => {
-  it('a whole role absent (both union gone), lead in the present role → degenerate', () => {
-    const action = decideGroupDay2(ROLES, members, present('b1', 'b2'), 'b1')
+describe('decideGroupDay2 — (c) DEGENERATE (a whole role missing — both sides required)', () => {
+  it('reporting role entirely absent → degenerate (no present member to lead)', () => {
+    // reporter=union but both union absent → union missing.
+    const action = decideGroupDay2(ROLES, members, present('b1', 'b2'), 'b1', 'union')
     expect(action).toEqual({ kind: 'degenerate', missingRoles: ['union'] })
   })
 
-  it("a whole role absent AND that role held the lead → degenerate (lead's role missing)", () => {
-    // lead u1 absent, u2 absent → union entirely missing.
-    const action = decideGroupDay2(ROLES, members, present('b1', 'b2'), 'u1')
-    expect(action).toEqual({ kind: 'degenerate', missingRoles: ['union'] })
+  it('the non-reporting role entirely absent → still degenerate (needs both sides to negotiate)', () => {
+    // reporter=union, union present, but baxter entirely absent → baxter missing.
+    const action = decideGroupDay2(ROLES, members, present('u1', 'u2'), 'b1', 'union')
+    expect(action).toEqual({ kind: 'degenerate', missingRoles: ['baxter'] })
   })
 
   it('both roles entirely absent → degenerate lists both roles', () => {
-    const action = decideGroupDay2(ROLES, members, present(), 'b1')
+    const action = decideGroupDay2(ROLES, members, present(), 'b1', 'union')
     expect(action).toEqual({ kind: 'degenerate', missingRoles: ['baxter', 'union'] })
-  })
-
-  it('degenerate takes precedence over an absent lead (never reassigns into a missing role)', () => {
-    // baxter role entirely absent (b1 lead + b2 both gone); union present. Missing role wins.
-    const action = decideGroupDay2(ROLES, members, present('u1', 'u2'), 'b1')
-    expect(action).toEqual({ kind: 'degenerate', missingRoles: ['baxter'] })
   })
 })

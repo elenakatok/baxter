@@ -36,6 +36,17 @@ const IDX_1983 = ROUNDS.indexOf('1983')
 const IDX_1985 = ROUNDS.indexOf('1985')
 
 /**
+ * Baxter's per-round REPORTING side — which role holds the group lead (reports the outcome; the
+ * other side confirms). 1978 = Baxter Management (assigned at matching); 1983 & 1985 = Local 190.
+ * Every shared gate + the frontend follow the lead FLAG purely (no role assumption), so rotating
+ * the reporter is just moving the lead flag. beginRound2 (1978→1983) flips the lead to this role;
+ * advanceRound (1983→1985) preserves it, so one reassignment covers both Local-led rounds.
+ * Falls back to the first role for any unlisted round (parity with matching's default lead).
+ */
+const REPORTER_ROLE_BY_ROUND: Record<string, string> = { '1978': 'baxter', '1983': 'union', '1985': 'union' }
+const reporterRoleForRound = (roundId: string): string => REPORTER_ROLE_BY_ROUND[roundId] ?? ROLE_KEYS[0]
+
+/**
  * Button 1 — "Open Round 2 Attendance". Advances the class from 1978 to 1983 by bumping the
  * round pointer ONLY; groups stay 'completed' (closed) so students re-confirm attendance
  * rather than negotiate. This is the day-2 counterpart to the general advanceRound, minus
@@ -160,7 +171,11 @@ export const beginRound2 = onCall({ cors: CORS }, async (request) => {
         membersByRole[role] = (gdata[`${role}_participants`] as string[] | undefined) ?? []
       }
       const leadId = gdata['lead_participant_id'] as string
-      const action = decideGroupDay2(ROLE_KEYS, membersByRole, presentIds, leadId)
+      // Reporting side for the round we are cutting INTO (1983): Local 190. decideGroupDay2 flips
+      // the lead to a present Local member, so Local reports 1983 (and 1985, which advanceRound
+      // inherits). If a Local member is absent it promotes a present Local partner (same machinery).
+      const reporterRole = reporterRoleForRound(ROUNDS[currentIdx])
+      const action = decideGroupDay2(ROLE_KEYS, membersByRole, presentIds, leadId, reporterRole)
 
       if (action.kind === 'degenerate') {
         batch.update(g.ref, {
