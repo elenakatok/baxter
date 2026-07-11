@@ -344,6 +344,14 @@ const KC_WRONG_PID = 'stu-1'
 // The three "Looking ahead to 1985" Likert fields (between-rounds, after 1978 / before 1983).
 const LIKERT_FIELDS = ['debrief_relationship_1978', 'debrief_trust_future', 'debrief_1985_difficulty']
 
+// Per-role, per-question Likert ratings — chosen so each column's class average (8 baxter + 8 union)
+// is a non-integer that is NOT itself a submitted rating, so the Likert-table average assertion
+// proves real averaging (not just displaying a value): relationship 3.50, trust 4.50, difficulty 5.50.
+const LIKERT_RATINGS = {
+  baxter: { debrief_relationship_1978: '5', debrief_trust_future: '6', debrief_1985_difficulty: '4' },
+  union:  { debrief_relationship_1978: '2', debrief_trust_future: '3', debrief_1985_difficulty: '7' },
+}
+
 async function driveSetup(page, pid) {
   await page.goto(studentUrl(pid))
   await page.waitForSelector('p:has-text("Your role")', { timeout: 60_000 })
@@ -393,11 +401,12 @@ async function driveReaffirm(s) {
 
 // ── Between-rounds "Looking ahead to 1985" Likert set (after 1978, before 1983) ──
 async function driveLookingAhead(s) {
-  const { page, pid } = s
+  const { page, pid, role } = s
   await page.waitForSelector('h1:has-text("Looking ahead to 1985")', { timeout: 30_000 })
   for (const field of LIKERT_FIELDS) {
-    // Click the label wrapping rating 4 (robust for controlled React radios — fires onChange).
-    await page.locator(`label:has(input[name="${field}"][value="4"])`).click()
+    // Click the label wrapping this role's rating (robust for controlled React radios — fires onChange).
+    const rating = LIKERT_RATINGS[role][field]
+    await page.locator(`label:has(input[name="${field}"][value="${rating}"])`).click()
   }
   await page.click('button:has-text("Submit")')
   // The submit MUST navigate off the Likert screen (persisted). A silent validation bounce would
@@ -839,7 +848,8 @@ async function main() {
   {
     const f = await readParticipantFields(students[0].pid)
     assert(f.looking_ahead_submitted_at != null, 'Likert — response persisted (looking_ahead_submitted_at set)')
-    assert(LIKERT_FIELDS.every(field => strVal(f[field]) === '4'), 'Likert — all three ratings stored on the participant doc')
+    assert(LIKERT_FIELDS.every(field => strVal(f[field]) === LIKERT_RATINGS[students[0].role][field]),
+      'Likert — all three ratings stored on the participant doc')
   }
   // 3) THEN the all-done screen, with the new "Part 2 … next class" line.
   {
@@ -1665,6 +1675,96 @@ async function main() {
     // And a non-edited 1985 doc still serves its default (edit is scoped to the one key).
     assert(served.includes('/role-info/1985-baxter-scoresheet.xlsx'),
       'Settings — untouched 1985 Baxter scoresheet still serves its default (edit is per-key)')
+  }
+
+  // ══ Question reports — 2 free-text (Winemaster format) + Likert table (new) ═════════════════════
+  banner('Question reports — free-text (issue-ranking + debrief reflection) + Likert table + averages')
+  {
+    const rd = await inst('getReportData')
+    const rows = rd.rows ?? []
+    const qs   = rd.questions ?? []
+    const lqs  = rd.likertQuestions ?? []
+
+    // ── Enumeration: exactly the 2 free-text questions get reports; the graded MC do NOT ──
+    const qFields = qs.map(q => q.field).sort()
+    assert(qFields.length === 2 && qFields.includes('prep_issue_ranking') && qFields.includes('debrief_reflection'),
+      `Text reports — exactly the 2 FREE-TEXT questions get reports (issue-ranking + debrief reflection) [${qFields.join(',')}]`)
+    assert(!qs.some(q => q.field.startsWith('kc_')),
+      'Text reports — the graded MC (kc_*) get NO text report (matches Winemaster: MC is auto-graded)')
+    assert(lqs.length === 3, `Likert — 3 Likert questions surfaced by getReportData [${lqs.length}]`)
+
+    // ── Persistence: every finalized student carries both text answers + all 3 Likert ratings ──
+    assert(rows.length === 16, `Reports — 16 finalized rows [${rows.length}]`)
+    assert(rows.every(r => (r.text_answers?.prep_issue_ranking ?? '').length > 0),
+      'Persisted — every student\'s issue-ranking response is stored + read back from getReportData')
+    assert(rows.every(r => (r.text_answers?.debrief_reflection ?? '').length > 0),
+      'Persisted — every student\'s debrief-reflection response is stored + read back')
+    assert(rows.every(r => lqs.every(q => r.likert_answers?.[q.field] != null)),
+      'Persisted — every student\'s 3 Likert ratings are stored + read back')
+
+    // Expected per-question averages, computed from the STORED ratings (verifies the UI averaging).
+    const expAvg = {}
+    for (const q of lqs) {
+      const vals = rows.map(r => Number(r.likert_answers[q.field])).filter(n => Number.isFinite(n))
+      expAvg[q.field] = vals.reduce((a, b) => a + b, 0) / vals.length
+    }
+    log('likert', lqs.map(q => `${q.field}=${expAvg[q.field].toFixed(2)}`).join('  '))
+
+    // ── UI: reports page renders both text tiles + the Likert table ──
+    const reports = await (await browser.newContext()).newPage()
+    await reports.goto(`${FE}/reports?_dev_game_instance_id=${encodeURIComponent(GID)}&_session=tab`)
+    await reports.waitForSelector('text=1978 Report', { timeout: 30_000 })
+    await reports.waitForSelector('text=/\\d+ participants? ·/', { timeout: 30_000 })
+
+    // Text report 1 — issue ranking (title == the prompt). ExportModal shows each response WITH role.
+    await reports.getByText('make a list of the issues', { exact: false }).first().click()
+    await reports.waitForSelector('pre', { timeout: 15_000 })
+    {
+      const body = await reports.locator('pre').innerText()
+      assert(/16 responses/.test(body), 'Text report (issue-ranking) — shows all 16 responses')
+      assert(body.includes('Baxter Management ·') && body.includes('Local 190 ·'),
+        'Text report (issue-ranking) — each response is labelled with the student role (Baxter Management / Local 190)')
+      assert(/baxter priorities:/.test(body) && /union priorities:/.test(body),
+        'Text report (issue-ranking) — shows the submitted free-text responses')
+    }
+    await reports.getByRole('button', { name: /Close/ }).click()
+
+    // Text report 2 — debrief reflection (title "Reflect on your negotiation experience.").
+    await reports.getByText('Reflect on your negotiation experience', { exact: false }).first().click()
+    await reports.waitForSelector('pre', { timeout: 15_000 })
+    {
+      const body = await reports.locator('pre').innerText()
+      assert(/16 responses/.test(body) && /the negotiation went as expected/.test(body),
+        'Text report (debrief reflection) — shows the submitted debrief responses')
+      assert(body.includes('Baxter Management ·') && body.includes('Local 190 ·'),
+        'Text report (debrief reflection) — each response is labelled with the student role')
+    }
+    await reports.getByRole('button', { name: /Close/ }).click()
+
+    // Likert table — students × 3 questions + per-question averages.
+    await reports.getByText('Looking Ahead to 1985 — Likert ratings', { exact: false }).first().click()
+    await reports.waitForSelector('h3:has-text("Looking Ahead to 1985 — Likert ratings")', { timeout: 15_000 })
+    // 16 student data rows + a bottom Average row.
+    const bodyRows = reports.locator('tbody tr')
+    assert(await bodyRows.count() === 17, `Likert table — 16 student rows + 1 average row [${await bodyRows.count()}]`)
+    // One known student's row shows its exact 3 stored ratings.
+    const s0 = rows.find(r => r.participant_id === students[0].pid)
+    if (s0) {
+      const tr = reports.locator(`tbody tr:has(td:has-text(${JSON.stringify(s0.display_name)}))`).first()
+      const tds = tr.locator('td')  // [name, role, q0, q1, q2]
+      for (let i = 0; i < lqs.length; i++) {
+        const cell = (await tds.nth(i + 2).innerText()).trim()
+        assert(cell === s0.likert_answers[lqs[i].field],
+          `Likert table — ${s0.display_name} ${lqs[i].field} rating = ${s0.likert_answers[lqs[i].field]} [${cell}]`)
+      }
+    }
+    // The Average row: first cell "Average" (colSpan 2), then one average per question column.
+    const avgCells = reports.locator('tbody tr:has(td:has-text("Average")) td')
+    for (let i = 0; i < lqs.length; i++) {
+      const cell = (await avgCells.nth(i + 1).innerText()).trim()
+      assert(cell === expAvg[lqs[i].field].toFixed(2),
+        `Likert table — ${lqs[i].field} per-question AVERAGE = ${expAvg[lqs[i].field].toFixed(2)} [${cell}]`)
+    }
   }
 
   banner(`RESULT — ${PASS} passed, ${FAIL} failed`)

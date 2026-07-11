@@ -15,12 +15,32 @@ import { score1985, baxterNoDeal1985, UNION_1985_NO_DEAL } from './score1985'
 // Exported so updateGroupContract can build identical rows without duplicating these.
 export const VALID_ROLES = new Set(['baxter', 'union'])
 
-// Text questions from prepDefaults — read once at module load.
-export const TEXT_QUESTIONS = (baxterGameDef.prepDefaults ?? [])
-  .filter(q => q.format === 'text' && !q.hidden)
-  .map(q => ({ field: q.field, prompt: q.prompt, role_target: q.role_target }))
+// Free-text questions that get a per-question report (Winemaster format). TWO for Baxter:
+//   1. the prepDefaults issue-ranking reflection (format 'text', role_target 'all'), and
+//   2. the post-1978 'debrief_reflection' — a FIXED reflection the shared Results/reaffirm screen
+//      writes for every student ("Reflect on your negotiation experience."). It is NOT a prepDefaults
+//      question, so it is appended here explicitly. Both are open-response; the graded MC (format
+//      'multiple_choice') are auto-graded and deliberately get NO text report (matches Winemaster).
+export const TEXT_QUESTIONS = [
+  ...(baxterGameDef.prepDefaults ?? [])
+    .filter(q => q.format === 'text' && !q.hidden)
+    .map(q => ({ field: q.field, prompt: q.prompt, role_target: q.role_target })),
+  { field: 'debrief_reflection', prompt: 'Reflect on your negotiation experience.', role_target: 'all' },
+]
 
 export const TEXT_FIELDS = TEXT_QUESTIONS.map(q => q.field)
+
+// Likert (1–7) debrief questions ("Looking ahead to 1985") — surfaced for the Likert TABLE report.
+// Distinct from TEXT_QUESTIONS (format 'text'); ordered by their declared `order` so the report
+// columns read relationship → trust → expected difficulty. Answers persist as top-level participant
+// fields (LookingAhead writes each q.field), read here the same way text answers are.
+export const LIKERT_QUESTIONS = (baxterGameDef.prepDefaults ?? [])
+  .filter(q => q.format === 'likert' && !q.hidden)
+  .slice()
+  .sort((a, b) => (a.order ?? 0) - (b.order ?? 0))
+  .map(q => ({ field: q.field, prompt: q.prompt, role_target: q.role_target }))
+
+export const LIKERT_FIELDS = LIKERT_QUESTIONS.map(q => q.field)
 
 const def = baxterGameDef
 const ROUNDS = def.rounds ?? []
@@ -45,6 +65,8 @@ export type ReportRow = {
   raw_score: number | null
   /** Keyed by question field; only present when the student submitted a non-empty answer. */
   text_answers: Record<string, string>
+  /** Likert (1–7) ratings keyed by debrief question field; present only when the student answered. */
+  likert_answers: Record<string, string>
 
   // ── 1978 ──────────────────────────────────────────────────────────────────
   /** The group's agreed 1978 six-issue contract (null = no deal). Populates the edit form + report. */
@@ -172,6 +194,12 @@ export async function buildReportRows(
       const val = d[field]
       if (typeof val === 'string' && val.trim()) text_answers[field] = val.trim()
     }
+    // Likert ratings (stored as strings '1'–'7' by LookingAhead) — same top-level read as text.
+    const likert_answers: Record<string, string> = {}
+    for (const field of LIKERT_FIELDS) {
+      const val = d[field]
+      if (val != null && String(val).trim()) likert_answers[field] = String(val).trim()
+    }
 
     // 1978 base: a ratified deal keeps its summed score; a no-deal / failed-ratification group
     // scores as the 1978 no-deal (Baxter min-ratified+5 / degenerate 50; Union 0).
@@ -207,6 +235,7 @@ export async function buildReportRows(
       role,
       raw_score: d['raw_score'] as number,
       text_answers,
+      likert_answers,
       outcome_1978: outcome1978,
       agreement_1978: outcome1978 != null,
       wage_1978: gi?.wage78Display ?? wage78OrStatusQuo(null),
@@ -252,6 +281,7 @@ export const getReportData = onCall({ cors: def.corsOrigins }, async (request) =
       ok: true as const,
       rows,
       questions: TEXT_QUESTIONS,
+      likertQuestions: LIKERT_QUESTIONS,
       schema: def.outcomeSchema,
       scheme1978: (configData['scheme1978'] ?? null) as unknown,
     }

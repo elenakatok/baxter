@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useRef, useState, type CSSProperties } from 'react'
 import { useNavigate, useSearchParams } from 'react-router-dom'
 import { httpsCallable } from 'firebase/functions'
 import { signInWithCustomToken, signOut } from 'firebase/auth'
@@ -106,6 +106,7 @@ type ReportRow = {
   role: string
   raw_score: number | null
   text_answers: Record<string, string>
+  likert_answers: Record<string, string>
   // 1978
   outcome_1978: Record<string, unknown> | null
   agreement_1978: boolean
@@ -337,6 +338,7 @@ export default function Reports() {
   // ── Data load ──────────────────────────────────────────────────────────────
   const [rows,      setRows]      = useState<ReportRow[] | null>(null)
   const [questions, setQuestions] = useState<QuestionMeta[]>([])
+  const [likertQuestions, setLikertQuestions] = useState<QuestionMeta[]>([])
   const [schema,    setSchema]    = useState<OutcomeSchema | null>(null)
   const [scheme1978, setScheme1978] = useState<Scheme1978>(null)
   const [loading,   setLoading]   = useState(false)
@@ -346,10 +348,11 @@ export default function Reports() {
     if (!sessionReady) return
     setLoading(true)
     setError(null)
-    const fn = httpsCallable<object, { ok: boolean; rows: ReportRow[]; questions: QuestionMeta[]; schema: OutcomeSchema; scheme1978: Scheme1978 }>(functions, 'getReportData')
+    const fn = httpsCallable<object, { ok: boolean; rows: ReportRow[]; questions: QuestionMeta[]; likertQuestions: QuestionMeta[]; schema: OutcomeSchema; scheme1978: Scheme1978 }>(functions, 'getReportData')
     fn({}).then(r => {
       setRows(r.data.rows)
       setQuestions(r.data.questions)
+      setLikertQuestions(r.data.likertQuestions ?? [])
       setSchema(r.data.schema)
       setScheme1978(r.data.scheme1978 ?? null)
       setLoading(false)
@@ -481,6 +484,23 @@ export default function Reports() {
   // ── Modal state ────────────────────────────────────────────────────────────
   const [activeReport, setActiveReport] = useState<ReportKind | null>(null)
   const [activeExport,  setActiveExport]  = useState<{ title: string; text: string } | null>(null)
+  const [likertOpen,    setLikertOpen]    = useState(false)
+
+  // ── Likert table data ("Looking ahead to 1985") ─────────────────────────────
+  // Rows = students who answered ≥1 Likert item (with role); one column per Likert question;
+  // a per-question AVERAGE across responders. Ratings persist as '1'–'7' strings.
+  const likertRows = (rows ?? [])
+    .filter(r => likertQuestions.some(q => r.likert_answers[q.field] != null))
+    .slice()
+    .sort((a, b) => (a.role.localeCompare(b.role)) || a.display_name.localeCompare(b.display_name))
+  const likertRespondents = likertRows.length
+  const likertAverages: Record<string, number | null> = {}
+  for (const q of likertQuestions) {
+    const vals = likertRows
+      .map(r => Number(r.likert_answers[q.field]))
+      .filter(n => Number.isFinite(n))
+    likertAverages[q.field] = vals.length ? vals.reduce((a, b) => a + b, 0) / vals.length : null
+  }
 
   // ── Tile config ────────────────────────────────────────────────────────────
   const finalized = rows?.length ?? 0
@@ -538,13 +558,23 @@ export default function Reports() {
       disabled: scatterPoints.length === 0,
       actionLabel: 'Project ↗',
     },
-    // One tile per text question (6 total: 3 Baxter + 3 Union).
+    // One tile per FREE-TEXT question (Baxter: the shared issue-ranking reflection). Mirrors the
+    // Winemaster export format (buildStudentTextExport → ExportModal). Baxter's question is
+    // role_target 'all' (asked of BOTH roles), so — unlike Winemaster's per-role questions — the
+    // tile includes every student who answered and prefixes each response with the student's role
+    // (Baxter Management / Local 190). A per-role question (role_target 'baxter'/'union') keeps the
+    // Winemaster single-role behaviour.
     ...questions.map(q => {
-      const rLabel = ROLE_LABELS[q.role_target] ?? q.role_target
-      const tileTitle = `${rLabel}: ${q.prompt}`
+      const shared = q.role_target === 'all'
+      const tileTitle = shared ? q.prompt : `${ROLE_LABELS[q.role_target] ?? q.role_target}: ${q.prompt}`
       const qRows: AiTextRow[] = (rows ?? [])
-        .filter(r => r.role === q.role_target && r.text_answers[q.field])
-        .map(r => ({ name: r.display_name, raw_score: r.raw_score, answer: r.text_answers[q.field] }))
+        .filter(r => (shared || r.role === q.role_target) && r.text_answers[q.field])
+        .map(r => ({
+          // Fold the role into the name so the shared export format still shows it per student.
+          name: shared ? `${roleLabel(r.role)} · ${r.display_name}` : r.display_name,
+          raw_score: r.raw_score,
+          answer: r.text_answers[q.field],
+        }))
       const text = buildStudentTextExport(tileTitle, qRows)
       return {
         id: q.field,
@@ -559,6 +589,21 @@ export default function Reports() {
         actionLabel: 'Open ↗',
       } satisfies ReportTileConfig
     }),
+    // Likert TABLE report ("Looking ahead to 1985") — Baxter-specific (Winemaster has no Likert):
+    // rows = students (with role), columns = the 3 debrief Likert questions, cells = 1–7 rating,
+    // bottom row = per-question average. Only shown once there are Likert questions.
+    ...(likertQuestions.length > 0 ? [{
+      id: 'likert-table',
+      title: 'Looking Ahead to 1985 — Likert ratings',
+      preview: likertRespondents === 0
+        ? <span style={{ color: '#94a3b8', fontSize: '0.85rem' }}>No responses yet.</span>
+        : <span style={{ fontSize: '1.25rem', fontWeight: 700, color: '#111' }}>
+            {likertRespondents} respondent{likertRespondents !== 1 ? 's' : ''}
+          </span>,
+      onOpen: () => setLikertOpen(true),
+      disabled: !rows || likertRespondents === 0,
+      actionLabel: 'Open ↗',
+    } satisfies ReportTileConfig] : []),
   ]
 
   // Columns + title for the active report modal.
@@ -785,6 +830,84 @@ export default function Reports() {
           onClose={() => setActiveExport(null)}
         />
       )}
+
+      {/* ── Likert table modal ("Looking ahead to 1985") — students × 3 questions + averages ── */}
+      {likertOpen && (
+        <div
+          onClick={() => setLikertOpen(false)}
+          style={{
+            position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.45)',
+            display: 'flex', alignItems: 'flex-start', justifyContent: 'center',
+            padding: '3rem 1rem', zIndex: 1000, overflowY: 'auto',
+          }}
+        >
+          <div
+            onClick={e => e.stopPropagation()}
+            style={{
+              background: '#fff', borderRadius: 8, boxShadow: '0 8px 32px rgba(0,0,0,0.25)',
+              width: '100%', maxWidth: 'min(1000px, calc(100vw - 2rem))', minWidth: 0,
+              boxSizing: 'border-box', maxHeight: 'calc(100vh - 6rem)', overflowY: 'auto',
+              padding: '1.25rem 1.5rem',
+            }}
+          >
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem' }}>
+              <h3 style={{ margin: 0, fontSize: '1rem', fontWeight: 600 }}>Looking Ahead to 1985 — Likert ratings (1–7)</h3>
+              <button
+                onClick={() => setLikertOpen(false)}
+                style={{ background: 'none', border: 'none', fontSize: '1.25rem', cursor: 'pointer', color: '#666' }}
+              >
+                ✕
+              </button>
+            </div>
+            <div style={{ overflow: 'auto', maxHeight: 'calc(100vh - 14rem)', border: '1px solid #ddd', borderRadius: 6 }}>
+              <table style={{ borderCollapse: 'collapse', width: '100%', fontSize: '0.85rem' }}>
+                <thead>
+                  <tr>
+                    <th style={likertTh('left')}>Name</th>
+                    <th style={likertTh('left')}>Role</th>
+                    {likertQuestions.map(q => (
+                      <th key={q.field} style={likertTh('center')} title={q.prompt}>{q.prompt}</th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {likertRows.map(r => (
+                    <tr key={r.participant_id}>
+                      <td style={likertTd('left')}>{r.display_name}</td>
+                      <td style={likertTd('left')}>{roleLabel(r.role)}</td>
+                      {likertQuestions.map(q => (
+                        <td key={q.field} style={likertTd('center')}>{r.likert_answers[q.field] ?? '—'}</td>
+                      ))}
+                    </tr>
+                  ))}
+                  <tr>
+                    <td style={likertFoot('left')} colSpan={2}>Average</td>
+                    {likertQuestions.map(q => (
+                      <td key={q.field} style={likertFoot('center')}>
+                        {likertAverages[q.field] == null ? '—' : likertAverages[q.field]!.toFixed(2)}
+                      </td>
+                    ))}
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }
+
+// ── Likert table cell styles ────────────────────────────────────────────────────
+const likertTh = (align: 'left' | 'center'): CSSProperties => ({
+  textAlign: align, padding: '0.5rem 0.75rem', borderBottom: '2px solid #D38626',
+  fontWeight: 700, fontSize: '0.8rem', color: '#333', position: 'sticky', top: 0, background: '#fff',
+})
+const likertTd = (align: 'left' | 'center'): CSSProperties => ({
+  textAlign: align, padding: '0.4rem 0.75rem', borderBottom: '1px solid #eee',
+  fontVariantNumeric: 'tabular-nums',
+})
+const likertFoot = (align: 'left' | 'center'): CSSProperties => ({
+  textAlign: align, padding: '0.5rem 0.75rem', borderTop: '2px solid #ccc',
+  fontWeight: 700, fontVariantNumeric: 'tabular-nums', background: '#faf7f2',
+})
