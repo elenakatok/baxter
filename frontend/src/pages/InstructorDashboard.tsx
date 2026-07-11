@@ -498,6 +498,11 @@ export default function InstructorDashboard() {
       settingsRoute="/settings"
       reportsRoute="/reports"
       scoreAndRecord={{ callableName: 'scoreAndRecord', label: 'Score & Record' }}
+      // Day-2 (1983) pre-negotiation window: the class has advanced to 1983 (Open Round 2
+      // Attendance) but "Begin 1983" has NOT re-opened the groups yet, so members still carry
+      // their 1978 'completed'. Relabel that carried "Completed" as "Prepared" here only. Once
+      // Begin 1983 runs (round2Begun) or the class moves to 1985 (currentRound 2), this is false.
+      betweenRoundsPreNegotiation={currentRound === 1 && !round2Begun}
       renderRoundControls={ctx => (
         <>
           <BaxterDay2Controls ctx={ctx} round2Begun={round2Begun} />

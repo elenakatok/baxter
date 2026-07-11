@@ -921,6 +921,13 @@ async function main() {
   await dash.reload(); await sleep(2500)
   await dash.waitForSelector('button:has-text("Open Round 2 Attendance")', { timeout: 15_000 })
   assert(true, '#1 — "Open Round 2 Attendance" SHOWN after all round-1 groups complete')
+  // ── Part 3.10 baseline — in 1978 (current_round 0) a finished group's members read "Completed"
+  // on the dashboard roster. The relabel must NOT touch this: only the day-2 pre-negotiation window.
+  {
+    const completed = await dash.locator('[data-testid="roster-table"] [data-status="Completed"]').count()
+    assert(completed >= 16,
+      `Part 3.10 baseline — 1978 finished members read "Completed" (relabel off in-round) [${completed}]`)
+  }
   await dash.click('button:has-text("Open Round 2 Attendance")')
   log('instr', 'clicked "Open Round 2 Attendance" (→ 1983)')
 
@@ -963,6 +970,17 @@ async function main() {
   await dash.reload(); await sleep(2500)
   await dash.waitForSelector('button:has-text("Begin 1983")', { timeout: 15_000 })
   assert(true, 'B — "Begin 1983" shown after Open Round 2 Attendance')
+  // ── Part 3.10 — DAY-2 PRE-NEGOTIATION window: the class has advanced to 1983 (Open Round 2
+  // Attendance) but "Begin 1983" has NOT re-opened the groups yet, so members still carry their
+  // 1978 'completed'. The dashboard relabels that carried "Completed" → "Prepared" for present
+  // members; no stale "Completed" remains. (Baxter-local flag; hosting-only relabel.)
+  {
+    await dash.waitForSelector('[data-testid="roster-table"]', { timeout: 15_000 })
+    const prepared  = await dash.locator('[data-testid="roster-table"] [data-status="Prepared"]').count()
+    const completed = await dash.locator('[data-testid="roster-table"] [data-status="Completed"]').count()
+    assert(prepared >= 16 && completed === 0,
+      `Part 3.10 — day-2 pre-negotiation: carried "Completed" reads "Prepared", none stale "Completed" [prepared=${prepared} completed=${completed}]`)
+  }
   await dash.click('button:has-text("Begin 1983")')
   log('instr', 'clicked "Begin 1983" (re-opens groups → negotiating)')
 
@@ -1004,6 +1022,12 @@ async function main() {
   {
     const stillThere = await dash.locator('button:has-text("Begin 1983")').isVisible().catch(() => false)
     assert(!stillThere, 'B — "Begin 1983" does NOT reappear once the round has begun')
+    // Part 3.10 — once "Begin 1983" re-opens the groups (round2Begun), the pre-negotiation window
+    // CLOSES: members read their live "Negotiating" status, not the relabel. Proves the relabel is
+    // scoped to the between-rounds window (Completed → Prepared → Negotiating across the boundaries).
+    const negotiating = await dash.locator('[data-testid="roster-table"] [data-status="Negotiating"]').count()
+    assert(negotiating >= 16,
+      `Part 3.10 — after Begin 1983 the roster shows live "Negotiating" (relabel window closed) [${negotiating}]`)
   }
 
   // ── Phase-aware role-info: 1983 (current_round=1) — round-correct switch ──
