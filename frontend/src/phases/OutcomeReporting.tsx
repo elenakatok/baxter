@@ -97,6 +97,20 @@ function OutcomeCard({ schema, outcome }: { schema: OutcomeFormSchema; outcome: 
   return <UiOutcomeCard schema={schema} outcome={outcome} labels={baxterLabels} />
 }
 
+// ── 1978 ratification gate (Baxter mechanic, spec §3 — frontend mirror of
+// functions/src/ratification1978.ts). The union ratifies a 1978 deal IFF Location = Deloitte
+// AND Transfer ≥ Most (stored enum key 'all' or 'most'). A deal failing EITHER is void and
+// scores as a 1978 no-deal. Compares the STORED ENUM KEYS ('deloitte'/'elsewhere';
+// 'all'/'most'/'some'), not labels. Only meaningful for the six-issue 1978 contract — callers
+// must gate on roundId '1978' (1983/1985 have no location/transfer keys + no ratification gate).
+function deal1978WouldFailRatification(outcome: OutcomeFields | null | undefined): boolean {
+  if (outcome == null) return false // an explicit no-deal is not a "deal that will fail ratification"
+  const ratifies =
+    outcome['location'] === 'deloitte' &&
+    (outcome['transfer'] === 'all' || outcome['transfer'] === 'most')
+  return !ratifies
+}
+
 // ── Main component ─────────────────────────────────────────────────────────────
 
 export default function OutcomeReporting({
@@ -115,6 +129,9 @@ export default function OutcomeReporting({
   const [pendingDeal,   setPendingDeal]   = useState<OutcomeFields | null>(null)
   const [pendingNoDeal, setPendingNoDeal] = useState(false)
   const [pendingReject, setPendingReject] = useState(false)
+  // Union-only 1978 pre-commit warning: the confirmer is about to accept a deal that will FAIL
+  // ratification (Location ≠ Deloitte OR Transfer = Some). Separate from the reject-confirm step.
+  const [pendingRatifyWarn, setPendingRatifyWarn] = useState(false)
   const [submitting,    setSubmitting]    = useState(false)
   const [formError,     setFormError]     = useState<string | null>(null)
   const [actionError,   setActionError]   = useState<string | null>(null)
@@ -143,6 +160,7 @@ export default function OutcomeReporting({
           setPendingDeal(null)
           setPendingNoDeal(false)
           setPendingReject(false)
+          setPendingRatifyWarn(false)
         }
       },
     )
@@ -202,6 +220,9 @@ export default function OutcomeReporting({
   const handleReject        = () => { setPendingReject(true); setActionError(null) }
   const handleConfirmReject = () => { setPendingReject(false); withSubmit(() => submitConfirmation(args, false)) }
   const handleCancelReject  = () => setPendingReject(false)
+  // Union 1978 ratification warning (opens BEFORE the confirm commits): "Yes, confirm" reuses
+  // handleConfirm (submits); "No, go back" cancels back to the review view. No commit on open.
+  const handleCancelRatifyWarn = () => setPendingRatifyWarn(false)
 
   // ── Loading ─────────────────────────────────────────────────────────────────
   if (!groupData) {
@@ -213,6 +234,13 @@ export default function OutcomeReporting({
 
   const roleKey   = groupData.baxter_participants.includes(participantId) ? 'baxter' : 'union'
   const roleLabel = labelFor(baxterConfig, roleKey)
+
+  // Union-only, 1978-only pre-commit ratification warning. A Local 190 confirmer accepting a
+  // 1978 deal that will FAIL ratification is warned first (they may still proceed — a failed-
+  // ratification no-deal is a valid outcome). Management (baxter) is NEVER shown this — it would
+  // leak the exact union ratification keys (info asymmetry). 1983/1985 have no ratification gate.
+  const unionFailingRatify1978 =
+    roundId === '1978' && roleKey === 'union' && deal1978WouldFailRatification(lead_outcome)
 
   const confirmedCount = Object.values(confirmations ?? {}).filter(v => v === 'confirmed').length
   const totalCount     = Object.keys(confirmations ?? {}).length
@@ -407,6 +435,32 @@ export default function OutcomeReporting({
     )
   }
 
+  // Union 1978 ratification warning (opens when a Local 190 confirmer accepts a deal that will
+  // fail ratification). Separate from the reject-confirm step; naming the reason. Proceeding is
+  // allowed (a failed-ratification no-deal is a valid outcome); go-back cancels with no commit.
+  if (myConf === 'pending' && pendingRatifyWarn) {
+    return (
+      <main style={mainStyle}>
+        <p style={subtitleStyle}>You are {roleLabel}</p>
+        <h1 style={h1Style}>Are you sure?</h1>
+        <p style={{ fontSize: '1.05rem', lineHeight: 1.6, color: '#555', marginBottom: '1.25rem' }}>
+          This deal will <strong>fail ratification</strong> — the union requires the plant at
+          Deloitte and transfer of All or Most members. It will be scored as a no-deal. Are you
+          sure you want to confirm?
+        </p>
+        {actionError && <p style={errorStyle}>{actionError}</p>}
+        <div style={btnRowStyle}>
+          <button onClick={handleConfirm} disabled={submitting}>
+            {submitting ? 'Submitting…' : 'Yes, confirm'}
+          </button>
+          <button onClick={handleCancelRatifyWarn} disabled={submitting} style={ghostBtnStyle}>
+            No, go back
+          </button>
+        </div>
+      </main>
+    )
+  }
+
   // Pending: show outcome for review
   if (myConf === 'pending') {
     return (
@@ -428,7 +482,10 @@ export default function OutcomeReporting({
         <p style={{ color: '#555', marginBottom: '1.5rem' }}>Does this match what you negotiated?</p>
         {actionError && <p style={errorStyle}>{actionError}</p>}
         <div style={btnRowStyle}>
-          <button onClick={handleConfirm} disabled={submitting}>
+          <button
+            onClick={unionFailingRatify1978 ? () => setPendingRatifyWarn(true) : handleConfirm}
+            disabled={submitting}
+          >
             {submitting ? '…' : 'Confirm'}
           </button>
           <button onClick={handleReject} disabled={submitting} style={ghostBtnStyle}>

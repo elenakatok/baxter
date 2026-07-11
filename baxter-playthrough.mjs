@@ -463,17 +463,29 @@ async function fill1978(leadPage, outcome) {
 }
 const fillCanonical1978 = leadPage => fill1978(leadPage, CANONICAL_1978_OUTCOME)
 
-/** Lead reports a 1978 deal (fills + reviews + submits); non-leads all Confirm (accept). */
+/** Lead reports a 1978 deal (fills + reviews + submits); non-leads all Confirm (accept). Used for
+ *  RATIFYING deals only (group D's failing deal is driven explicitly with warning checks). */
 async function drive1978Deal(members, outcome) {
   const lead = members.find(m => m.is_lead) ?? members[0]
   const nonLeads = members.filter(m => m !== lead)
   await fill1978(lead.page, outcome)
   await lead.page.click('button:has-text("Review & submit")')
   await lead.page.waitForSelector('h1:has-text("Confirm outcome")', { timeout: 10_000 })
+  // Part R (assertion 3) — the Management LEAD's submit dialog never reveals the union
+  // ratification gate (the warning is union-confirm-only; Management must not see the keys).
+  assert(await lead.page.locator('text=/fail ratification/i').count() === 0,
+    '1978 ratify-warn — Management submit dialog does NOT reveal the ratification gate (no key leak)')
   await lead.page.click('button:has-text("Yes, submit")')
   await Promise.all(nonLeads.map(async s => {
     await s.page.waitForSelector('h1:has-text("Confirm")', { timeout: 30_000 })
     await s.page.click('button:has-text("Confirm")')
+    // Part R (assertion 2) — a RATIFYING deal (Deloitte + Transfer≥Most) shows NO warning, even
+    // to a Union confirmer: clicking Confirm commits directly (no "Are you sure?" step appears).
+    if (s.role === 'union') {
+      const warned = await s.page.waitForSelector('h1:has-text("Are you sure")', { timeout: 2_000 })
+        .then(() => true).catch(() => false)
+      assert(!warned, '1978 ratify-warn — Union confirming a RATIFYING deal is NOT warned (Deloitte + Transfer≥Most)')
+    }
   }))
 }
 
@@ -568,9 +580,56 @@ async function drive1978Negotiation(students) {
     log(gid, 'ratified dealer — canonical 1978 deal accepted')
   }))
 
-  // ── FAILED-RATIFICATION dealer (D): a real DEAL, but Transfer=Some → gate rejects → no-deal ──
-  await drive1978Deal(groups[failRatifyGid], FAIL_RATIFY_1978_OUTCOME)
-  log(failRatifyGid, 'failed-ratification dealer — 1978 DEAL accepted (Transfer=Some → NOT ratified)')
+  // ── FAILED-RATIFICATION dealer (D): a real DEAL, but Transfer=Some → gate rejects → no-deal.
+  // Driven EXPLICITLY to exercise the Union pre-commit ratification warning (Part R). ──
+  {
+    const members = groups[failRatifyGid]
+    const lead = members.find(m => m.is_lead) ?? members[0]
+    assert(lead.role === 'baxter', '1978 ratify-warn — group D lead is Management (reports the deal)')
+    const unionNon  = members.filter(m => m !== lead && m.role === 'union')
+    const baxterNon = members.filter(m => m !== lead && m.role === 'baxter')
+
+    await fill1978(lead.page, FAIL_RATIFY_1978_OUTCOME)
+    await lead.page.click('button:has-text("Review & submit")')
+    await lead.page.waitForSelector('h1:has-text("Confirm outcome")', { timeout: 10_000 })
+    assert(await lead.page.locator('text=/fail ratification/i').count() === 0,
+      '1978 ratify-warn — Management submit of a FAILING deal still does NOT reveal the ratification gate (no key leak)')
+    await lead.page.click('button:has-text("Yes, submit")')
+
+    // Assertion 1 — a UNION confirmer of this failing deal is WARNED (naming the reason); "No, go
+    // back" cancels with NO commit; confirming THROUGH the warning commits.
+    const u0 = unionNon[0]
+    await u0.page.waitForSelector('h1:has-text("Confirm the outcome")', { timeout: 30_000 })
+    await u0.page.click('button:has-text("Confirm")')
+    await u0.page.waitForSelector('h1:has-text("Are you sure")', { timeout: 10_000 })
+    assert(await u0.page.locator('text=/fail ratification/i').count() > 0,
+      '1978 ratify-warn — Union confirming a FAILING deal is WARNED before commit, naming the reason (ratification)')
+    await u0.page.click('button:has-text("No, go back")')
+    await u0.page.waitForSelector('h1:has-text("Confirm the outcome")', { timeout: 10_000 })
+    assert((await readGroupsFull()).find(x => x.id === failRatifyGid)?.status !== 'completed',
+      '1978 ratify-warn — "No, go back" cancels the warning: the group is NOT committed')
+    await u0.page.click('button:has-text("Confirm")')
+    await u0.page.waitForSelector('h1:has-text("Are you sure")', { timeout: 10_000 })
+    await u0.page.click('button:has-text("Yes, confirm")')
+    assert(true, '1978 ratify-warn — confirming THROUGH the warning proceeds (a failed-ratification no-deal is a valid outcome)')
+
+    // Remaining union confirmers: warned → confirm through. Management (baxter) confirmer: NO
+    // warning (assertion 3 — the union ratification keys are never shown to Management).
+    for (const s of unionNon.slice(1)) {
+      await s.page.waitForSelector('h1:has-text("Confirm the outcome")', { timeout: 30_000 })
+      await s.page.click('button:has-text("Confirm")')
+      await s.page.waitForSelector('h1:has-text("Are you sure")', { timeout: 10_000 })
+      await s.page.click('button:has-text("Yes, confirm")')
+    }
+    for (const s of baxterNon) {
+      await s.page.waitForSelector('h1:has-text("Confirm the outcome")', { timeout: 30_000 })
+      await s.page.click('button:has-text("Confirm")')
+      const warned = await s.page.waitForSelector('h1:has-text("Are you sure")', { timeout: 3_000 })
+        .then(() => true).catch(() => false)
+      assert(!warned, '1978 ratify-warn — Management (baxter) confirmer of the FAILING deal is NOT warned (info asymmetry preserved)')
+    }
+  }
+  log(failRatifyGid, 'failed-ratification dealer — 1978 DEAL accepted through the Union ratification warning (Transfer=Some → NOT ratified)')
 
   // Wait: ratified dealers completed (deal); rejecter + failed-ratify completed.
   const gs = await pollGroupsFull(g =>
@@ -1096,9 +1155,16 @@ async function main() {
   await leadA.page.click('button:has-text("Review & submit")')
   await leadA.page.waitForSelector('h1:has-text("Confirm outcome")', { timeout: 10_000 })
   await leadA.page.click('button:has-text("Yes, submit")')
-  await Promise.all(presentNonA.map(async s => {
+  await Promise.all(presentNonA.map(async (s, i) => {
     await s.page.waitForSelector('h1:has-text("Confirm")', { timeout: 30_000 })
     await s.page.click('button:has-text("Confirm")')
+    // Part R (assertion 4) — 1983 has NO ratification gate: confirming shows NO warning (Confirm
+    // commits directly). Checked on the first confirmer.
+    if (i === 0) {
+      const warned = await s.page.waitForSelector('h1:has-text("Are you sure")', { timeout: 2_000 })
+        .then(() => true).catch(() => false)
+      assert(!warned, '1978 ratify-warn — NO ratification warning in 1983 (no gate outside 1978)')
+    }
   }))
   log('1983', `group A lead ${leadA.pid} re-offered $9.50 after a reject; all accepted`)
 
@@ -1393,9 +1459,15 @@ async function main() {
   await leadA85.page.click('button:has-text("Review & submit")')
   await leadA85.page.waitForSelector('h1:has-text("Confirm outcome")', { timeout: 10_000 })
   await leadA85.page.click('button:has-text("Yes, submit")')
-  await Promise.all(presentNonA85.map(async s => {
+  await Promise.all(presentNonA85.map(async (s, i) => {
     await s.page.waitForSelector('h1:has-text("Confirm")', { timeout: 30_000 })
     await s.page.click('button:has-text("Confirm")')
+    // Part R (assertion 4) — 1985 has NO ratification gate: confirming shows NO warning.
+    if (i === 0) {
+      const warned = await s.page.waitForSelector('h1:has-text("Are you sure")', { timeout: 2_000 })
+        .then(() => true).catch(() => false)
+      assert(!warned, '1978 ratify-warn — NO ratification warning in 1985 (no gate outside 1978)')
+    }
   }))
   {
     // Part 1 — the group COMMITS on the present confirmations alone (status completed + wage85
