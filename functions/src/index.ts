@@ -12,6 +12,7 @@ import {
   makeTriggerMatching,
   makeAdvanceRound,
   makeStartNegotiation,
+  makeGetGroupMemberEmails,
   makeSubmitLeadOutcome,
   makeSubmitConfirmation,
   makeSubmitInstructorOutcome,
@@ -50,6 +51,7 @@ export const syncRoster             = makeSyncRoster(baxterGameDef)
 export const triggerMatching            = makeTriggerMatching(baxterGameDef)
 export const advanceRound               = makeAdvanceRound(baxterGameDef)
 export const startNegotiation           = makeStartNegotiation(baxterGameDef)
+export const getGroupMemberEmails      = makeGetGroupMemberEmails(baxterGameDef)
 export const submitLeadOutcome          = makeSubmitLeadOutcome(baxterGameDef)
 export const submitConfirmation         = makeSubmitConfirmation(baxterGameDef)
 export const submitInstructorOutcome    = makeSubmitInstructorOutcome(baxterGameDef)
