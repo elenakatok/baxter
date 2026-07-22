@@ -1,5 +1,9 @@
 import type { Outcome, OutcomeSchema, RoleConfig } from '@mygames/game-engine'
 import type { GameDefinition } from '@mygames/game-server'
+// Shared latecomer joinability (Latecomer_Placement_Spec_v1 §3.1). Placement is
+// gated to the FIRST round by makeVerifyAttendanceCode; day-2 returning students
+// hold a group_id and are handled by baxter's own day-2 re-attendance flow.
+import { negotiationIsJoinable } from '@mygames/game-server'
 
 // ── Role config ───────────────────────────────────────────────────────────────
 
@@ -120,6 +124,9 @@ export const baxterGameDef: GameDefinition = {
   reservations: { baxter: 0, union: 0 },  // unused by the 1978 sum scorer (no surplus/reservation model)
   corsOrigins: ['https://baxter.mygames.live'],
   classroom: { callbackSecretId: 'CLASSROOM_CALLBACK_SECRET' },
+  // Latecomer auto-placement, DAY 1 ONLY (audit-confirmed). Round-1 groups are
+  // 'matched'; creation is group_id-only, no per-member setup, so no onPlace.
+  isJoinable: negotiationIsJoinable,
   // perRoleCap omitted → factory uses eligible.length (no cap, place every extra).
   // deadlockThreshold omitted → factory defaults to 5.
 

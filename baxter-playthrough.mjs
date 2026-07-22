@@ -793,6 +793,78 @@ async function driveNoDealToDeal(reports, round) {
 
 // ── MAIN ──────────────────────────────────────────────────────────────────────
 
+// ── Latecomer placement + first-round GATE (Latecomer_Placement_Spec_v1, baxter) ──
+// Appended after the full playthrough (seedGroupForTest wipes GID, so it cannot
+// disturb the assertions above). Drives verifyAttendanceCode via callables + REST.
+// The GATE is round-based: the SAME matched group places a latecomer in round 1
+// (current_round 0 → slot 'flat') but NOT in round 2 (current_round 1 → 'keyed').
+
+async function restPatch(path, fields, mask) {
+  const q = mask.map(p => `updateMask.fieldPaths=${encodeURIComponent(p)}`).join('&')
+  const res = await fetch(`${FIRESTORE}/${path}?${q}`, {
+    method: 'PATCH',
+    headers: { Authorization: 'Bearer owner', 'content-type': 'application/json' },
+    body: JSON.stringify({ fields }),
+  })
+  return res.ok
+}
+const ISO = () => new Date().toISOString()
+const seedMatched = (gid, bax, uni, lead) =>
+  callFn('seedGroupForTest', { game_instance_id: GID, group_id: gid, lead_id: lead, baxter_participants: bax, union_participants: uni })
+const setRound = idx => restPatch(`game_instances/${GID}`, { current_round: { integerValue: String(idx) } }, ['current_round'])
+const setGroupStatus = (gid, status) => restPatch(`game_instances/${GID}/groups/${gid}`, { status: { stringValue: status } }, ['status'])
+const seedLatecomer = (pid, role) => restPatch(`game_instances/${GID}/participants/${pid}`, {
+  participant_id: { stringValue: pid }, game_instance_id: { stringValue: GID },
+  role: { stringValue: role }, confirmed_ready_at: { timestampValue: ISO() },
+}, ['participant_id', 'game_instance_id', 'role', 'confirmed_ready_at'])
+const markReady = pid => restPatch(`game_instances/${GID}/participants/${pid}`, { confirmed_ready_at: { timestampValue: ISO() } }, ['confirmed_ready_at'])
+const genCode = () => inst('generateAttendanceCode')
+const enterCode = (pid, code) => stu('verifyAttendanceCode', pid, { code })
+async function lateState(pid) {
+  const f = await readParticipantFields(pid)
+  return { group_id: strVal(f.group_id) || null, absent: f.latecomer_absent?.booleanValue ?? false }
+}
+
+async function runLatecomerGate() {
+  banner('LATECOMER placement + first-round GATE (Baxter)')
+
+  // TEST 2 — round 1 (current_round 0), matched group → PLACED, like the negotiation games.
+  await seedMatched('glr1', ['b1'], ['u1'], 'b1')
+  await setRound(0)
+  await seedLatecomer('lx', 'baxter')
+  await enterCode('lx', (await genCode()).code)
+  const lx = await lateState('lx')
+  assert(lx.group_id === 'glr1', `Baxter 2 — round 1 latecomer PLACED into the matched group [${lx.group_id}]`)
+
+  // TEST 3 — round 1, no joinable group (negotiating) → terminal message, not the spinner.
+  await seedMatched('glr3', ['b2'], ['u2'], 'b2')
+  await setGroupStatus('glr3', 'negotiating')   // not 'matched' → not joinable
+  await setRound(0)
+  await seedLatecomer('ly', 'baxter')
+  await enterCode('ly', (await genCode()).code)
+  const ly = await lateState('ly')
+  assert(ly.group_id === null && ly.absent === true,
+    `Baxter 3 — round 1, no joinable group → latecomer_absent set (terminal message), never placed`)
+
+  // TEST 4 — THE GATE. Round 2 (current_round 1). The SAME matched, joinable group that
+  // placed in round 1 must NOT place now; the block must not run at all.
+  await seedMatched('glr4', ['b3'], ['u3'], 'b3')
+  await setRound(1)                              // ROUND 2 (1983)
+  await seedLatecomer('lz', 'baxter')
+  const code2 = (await genCode()).code
+  await enterCode('lz', code2)
+  const lz = await lateState('lz')
+  assert(lz.group_id === null && lz.absent === false,
+    `Baxter 4 — round 2 GATE: placement did NOT run — no group_id AND NOT latecomer_absent (same group placed in round 1)`)
+
+  // TEST 5 — round 2, a returning student WITH group_id → placement never considered.
+  await markReady('b3')                          // seedGroupForTest omits confirmed_ready_at
+  await enterCode('b3', code2)
+  const b3 = await lateState('b3')
+  assert(b3.group_id === 'glr4' && b3.absent === false,
+    `Baxter 5 — round 2 returning student keeps their group_id, never placed or marked absent`)
+}
+
 async function main() {
   banner(`Baxter day-2 EMULATOR play-through — instance ${GID}`)
   console.log(`Frontend ${FE} · Functions ${FUNCTIONS} · Firestore ${FIRESTORE}\n`)
@@ -1969,6 +2041,10 @@ async function main() {
         `Likert table — ${lqs[i].field} per-question AVERAGE = ${expAvg[lqs[i].field].toFixed(2)} [${cell}]`)
     }
   }
+
+  // Latecomer placement + first-round gate — appended so seedGroupForTest's wipe
+  // cannot disturb the playthrough assertions above.
+  await runLatecomerGate()
 
   banner(`RESULT — ${PASS} passed, ${FAIL} failed`)
   // Any non-throwing assertion failures still get a full page/heading/screenshot dump.

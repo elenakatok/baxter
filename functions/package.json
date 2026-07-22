@@ -15,7 +15,7 @@
   "main": "lib/index.js",
   "dependencies": {
     "@mygames/game-engine": "git+https://github.com/elenakatok/game-engine.git#v0.5.0",
-    "@mygames/game-server": "git+https://github.com/elenakatok/game-server.git#v0.16.0",
+    "@mygames/game-server": "git+https://github.com/elenakatok/game-server.git#v0.19.0",
     "firebase-admin": "^12.0.0",
     "firebase-functions": "^6.0.0",
     "jsonwebtoken": "^9.0.3"
