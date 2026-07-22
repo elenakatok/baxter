@@ -588,6 +588,7 @@ export default function Play() {
           // (Bug F): the group is re-attended but not yet re-opened, so go to the day-2 hold —
           // never the GroupReveal Start button, which would 400 pre-Begin-1983.
           onMatched={(groupId) => setPhase(currentRound > 0 ? { name: 'day2-hold', groupId } : { name: 'group-reveal', groupId })}
+          classroomUrl={CLASSROOM_URL}
         />
       )}
 
